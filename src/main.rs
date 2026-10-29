@@ -6,8 +6,12 @@ mod gui;
 use clap::Parser;
 use colored::Colorize;
 use heavydrop::manager;
+use heavydrop::pairing::PairingCode;
 use heavydrop::receiver;
 use heavydrop::sender;
+use heavydrop::server::SignalingServer;
+use heavydrop::session::Session;
+use heavydrop::signaling::SignalingClient;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -55,7 +59,7 @@ fn launch_gui() -> ExitCode {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 640.0])
+            .with_inner_size([740.0, 600.0])
             .with_min_inner_size([640.0, 520.0])
             .with_title("⚡ HeavyDrop - P2P File Transfer (50GB+)"),
         ..Default::default()
@@ -85,7 +89,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
         if tokio::signal::ctrl_c().await.is_ok() {
             println!(
                 "\n{}",
-                "Received Ctrl+C, cancelling transfer cooperatively...".yellow()
+                "Recibido Ctrl+C, cancelando transferencia cooperativamente...".yellow()
             );
             mgr_cancel.cancel();
         }
@@ -94,42 +98,60 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
     let result = match cmd {
         cli::Commands::Send {
             file,
-            port,
-            bind,
-            chunk_size_mb,
-            token,
             no_prehash,
+            port,
+            signal_server,
         } => {
-            let chunk_size = chunk_size_mb.max(1) * 1024 * 1024;
-            manager
-                .run_send(sender::SenderConfig {
-                    file_path: file,
-                    bind_addr: bind,
-                    port,
-                    chunk_size,
-                    token,
-                    skip_prehash: no_prehash,
-                    shared_progress: None,
-                    cancel_signal: None,
-                })
-                .await
+            let session = match Session::new() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error al generar sesión y código de emparejamiento: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let config = sender::SenderConfig {
+                file_path: file,
+                session,
+                preferred_port: port,
+                chunk_size: 4 * 1024 * 1024,
+                skip_prehash: no_prehash,
+                signaling_server: signal_server.or_else(SignalingClient::default_server),
+                shared_progress: None,
+                cancel_signal: None,
+            };
+
+            manager.run_send(config).await
         }
         cli::Commands::Recv {
-            address,
+            code,
             output_dir,
-            token,
             force,
+            signal_server,
         } => {
-            manager
-                .run_recv(receiver::ReceiverConfig {
-                    peer_addr: address,
-                    output_dir,
-                    token,
-                    force,
-                    shared_progress: None,
-                    cancel_signal: None,
-                })
-                .await
+            let parsed_code = match PairingCode::parse(&code) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error en el código de conexión: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let config = receiver::ReceiverConfig {
+                code: parsed_code,
+                output_dir,
+                force,
+                signaling_server: signal_server.or_else(SignalingClient::default_server),
+                shared_progress: None,
+                cancel_signal: None,
+                discovery: None,
+            };
+
+            manager.run_recv(config).await
+        }
+        cli::Commands::Server { port } => {
+            let server = SignalingServer::new(port);
+            server.run().await
         }
         cli::Commands::Gui => unreachable!(),
     };
@@ -137,7 +159,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
     if let Err(e) = result {
         eprintln!("\n{} {}", "ERROR:".red().bold(), e);
         for cause in e.chain().skip(1) {
-            eprintln!("  {} {}", "Caused by:".yellow(), cause);
+            eprintln!("  {} {}", "Causa:".yellow(), cause);
         }
         ExitCode::FAILURE
     } else {
