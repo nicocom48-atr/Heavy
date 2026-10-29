@@ -207,3 +207,16 @@ Para transferir archivos P2P entre dos computadoras que no están en la misma re
 2. **Opción Clásica: Reenvío de Puertos (*Port Forwarding*)**
    - En el router del emisor, abre y redirige el puerto TCP `7878` hacia la IP local de la computadora emisora.
    - El receptor simplemente se conecta a la IP pública del emisor: `heavydrop recv TU_IP_PUBLICA:7878`.
+
+
+---
+
+## 📦 Descargas y Releases Automáticas
+
+Puedes descargar ejecutables precompilados directamente desde la sección de **[Releases en GitHub](https://github.com/nicocom48-atr/Heavy/releases)**.
+
+Cada vez que se publica una versión mediante un tag (ej. `v0.1.0`) o se ejecuta el flujo manual desde GitHub Actions, se compilan y empaquetan automáticamente binarios optimizados con sus checksums SHA-256:
+- 🪟 **Windows (x86_64):** `heavydrop-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+- 🐧 **Linux (x86_64):** `heavydrop-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- 🍏 **macOS Apple Silicon:** `heavydrop-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+- 🍎 **macOS Intel:** `heavydrop-vX.Y.Z-x86_64-apple-darwin.tar.gz`
