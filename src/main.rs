@@ -59,7 +59,7 @@ fn launch_gui() -> ExitCode {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([740.0, 600.0])
+            .with_inner_size([820.0, 600.0])
             .with_min_inner_size([640.0, 520.0])
             .with_title("⚡ HeavyDrop - P2P File Transfer (50GB+)"),
         ..Default::default()

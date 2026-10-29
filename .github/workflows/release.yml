@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Nombre del Tag para la Release (ej. v0.1.1)'
+        description: 'Nombre del Tag para la Release (ej. v0.2.0)'
         required: true
-        default: 'v0.1.1'
+        default: 'v0.2.0'
       draft:
         description: 'Crear como borrador (Draft)'
         type: boolean
@@ -48,7 +48,7 @@ jobs:
         shell: pwsh
         run: |
           $TAG = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.tag_name }}" }
-          if (-not $TAG -or $TAG.Trim() -eq "") { $TAG = "v0.1.0" }
+          if (-not $TAG -or $TAG.Trim() -eq "") { $TAG = "v0.2.0" }
           "RELEASE_TAG=$TAG" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
           $ARCHIVE = "heavydrop-${TAG}-windows-x64.zip"

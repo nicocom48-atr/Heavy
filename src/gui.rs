@@ -70,36 +70,37 @@ impl HeavyDropApp {
 
     fn apply_custom_theme(ctx: &egui::Context) {
         let mut visuals = egui::Visuals::dark();
-        visuals.window_fill = egui::Color32::from_rgb(15, 23, 42); // slate-900
-        visuals.panel_fill = egui::Color32::from_rgb(15, 23, 42);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(2, 6, 23); // slate-950
+        visuals.window_fill = egui::Color32::from_rgb(10, 15, 29); // slate-950 deep dark
+        visuals.panel_fill = egui::Color32::from_rgb(10, 15, 29);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(3, 7, 18);
 
-        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(30, 41, 59); // slate-800
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(20, 27, 45);
         visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(51, 65, 85));
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(38, 48, 74));
         visuals.widgets.noninteractive.fg_stroke =
             egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(226, 232, 240));
 
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(30, 41, 59);
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(24, 33, 54);
         visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(71, 85, 105));
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(51, 65, 85));
         visuals.widgets.inactive.fg_stroke =
             egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(226, 232, 240));
 
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(51, 65, 85);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(45, 59, 90);
         visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(56, 189, 248)); // sky-400
-        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(56, 189, 248));
+        visuals.widgets.hovered.fg_stroke =
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 255, 255));
 
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(2, 132, 199); // sky-600
-        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5_f32, egui::Color32::WHITE);
-        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(2, 132, 199);
+        visuals.widgets.active.bg_stroke =
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(56, 189, 248));
 
         ctx.set_visuals(visuals);
     }
 
-    fn show_toast(&mut self, text: &str) {
-        self.copied_toast_text = text.to_string();
+    fn show_toast(&mut self, text: impl Into<String>) {
+        self.copied_toast_text = text.into();
         self.copied_toast_time = Some(Instant::now());
     }
 
@@ -111,7 +112,10 @@ impl HeavyDropApp {
     fn start_send_task(&mut self) {
         let file_path = match self.send_file_path.clone() {
             Some(p) => p,
-            None => return,
+            None => {
+                self.send_error = Some("Por favor selecciona un archivo primero.".to_string());
+                return;
+            }
         };
 
         let session = match Session::new() {
@@ -193,81 +197,140 @@ impl eframe::App for HeavyDropApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Header
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("⚡ HeavyDrop")
-                        .size(24.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(56, 189, 248)),
-                );
-                ui.label(
-                    egui::RichText::new("Transferencia P2P Masiva por Códigos Temporales")
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(148, 163, 184)),
-                );
-            });
-            ui.add_space(8.0);
-
-            // Tabs: Enviar | Recibir
-            ui.horizontal(|ui| {
-                let send_btn = ui.selectable_label(self.active_tab == ActiveTab::Send, "📤 Enviar");
-                if send_btn.clicked() && !is_busy {
-                    self.active_tab = ActiveTab::Send;
-                }
-
-                let recv_btn =
-                    ui.selectable_label(self.active_tab == ActiveTab::Receive, "📥 Recibir");
-                if recv_btn.clicked() && !is_busy {
-                    self.active_tab = ActiveTab::Receive;
-                }
-            });
-            ui.separator();
-            ui.add_space(8.0);
-
-            // Toast notification
-            if let Some(toast_time) = self.copied_toast_time {
-                if toast_time.elapsed().as_secs() < 3 {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // Header Bar
+                ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(&self.copied_toast_text)
-                            .color(egui::Color32::from_rgb(34, 197, 94))
-                            .strong(),
+                        egui::RichText::new("⚡ HeavyDrop")
+                            .size(22.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(56, 189, 248)),
                     );
-                } else {
-                    self.copied_toast_time = None;
+                    ui.label(
+                        egui::RichText::new("Transferencia P2P Masiva por Códigos Temporales")
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+                ui.add_space(8.0);
+
+                // Toast notification
+                if let Some(toast_time) = self.copied_toast_time {
+                    if toast_time.elapsed().as_secs() < 3 {
+                        ui.label(
+                            egui::RichText::new(&self.copied_toast_text)
+                                .color(egui::Color32::from_rgb(34, 197, 94))
+                                .strong(),
+                        );
+                        ui.add_space(4.0);
+                    } else {
+                        self.copied_toast_time = None;
+                    }
                 }
-            }
 
-            // Monitor area (when active transfer is in progress)
-            let progress = self.manager.progress().lock().clone();
-            if is_busy || progress.status != TransferStatus::Idle {
-                self.render_transfer_status(ui, &progress);
-                ui.add_space(16.0);
-            }
+                // Transfer Monitor area (when active transfer is in progress)
+                let progress = self.manager.progress().lock().clone();
+                if is_busy || progress.status != TransferStatus::Idle {
+                    self.render_transfer_status(ui, &progress);
+                    ui.add_space(14.0);
+                }
 
-            // Main Tab View
-            match self.active_tab {
-                ActiveTab::Send => self.render_send_tab(ui, is_busy),
-                ActiveTab::Receive => self.render_receive_tab(ui, is_busy),
-            }
+                // Main Content Frame (Mockup-inspired dual card layout)
+                egui::Frame::group(ui.style())
+                    .fill(egui::Color32::from_rgb(15, 23, 42)) // slate-900
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgb(30, 41, 59),
+                    ))
+                    .rounding(10.0)
+                    .inner_margin(16.0)
+                    .show(ui, |ui| {
+                        let total_width = ui.available_width();
+                        let is_wide = total_width >= 620.0;
+
+                        if is_wide {
+                            let col_width = (total_width - 24.0) / 2.0;
+
+                            ui.horizontal(|ui| {
+                                // Left Column: Enviar
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(col_width, 10.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        self.render_send_panel(ui, is_busy);
+                                    },
+                                );
+
+                                ui.add_space(20.0);
+
+                                // Right Column: Recibir
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(col_width, 10.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        self.render_receive_panel(ui, is_busy);
+                                    },
+                                );
+                            });
+                        } else {
+                            // Responsive fallback tabs for narrow screens
+                            ui.horizontal(|ui| {
+                                let send_active = self.active_tab == ActiveTab::Send;
+                                if ui.selectable_label(send_active, "📤 Enviar").clicked() && !is_busy {
+                                    self.active_tab = ActiveTab::Send;
+                                }
+                                let recv_active = self.active_tab == ActiveTab::Receive;
+                                if ui.selectable_label(recv_active, "📥 Recibir").clicked() && !is_busy {
+                                    self.active_tab = ActiveTab::Receive;
+                                }
+                            });
+                            ui.separator();
+                            ui.add_space(8.0);
+
+                            match self.active_tab {
+                                ActiveTab::Send => self.render_send_panel(ui, is_busy),
+                                ActiveTab::Receive => self.render_receive_panel(ui, is_busy),
+                            }
+                        }
+                    });
+
+                // Architecture and Security Footer note
+                ui.add_space(12.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "🔒 Cifrado ChaCha20-Poly1305 + X25519 • P2P directo LAN/WAN con fallback a Relay cifrado",
+                        )
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(100, 116, 139)),
+                    );
+                });
+            });
         });
     }
 }
 
 impl HeavyDropApp {
-    fn render_send_tab(&mut self, ui: &mut egui::Ui, is_busy: bool) {
-        ui.heading("Enviar archivo");
-        ui.add_space(6.0);
+    fn render_send_panel(&mut self, ui: &mut egui::Ui, is_busy: bool) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("📤 Enviar")
+                    .size(17.0)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            );
+        });
+        ui.add_space(8.0);
 
-        // 1. File selection / Drop zone card
+        // 1. File selection card / drop area
         egui::Frame::group(ui.style())
-            .fill(egui::Color32::from_rgb(30, 41, 59))
+            .fill(egui::Color32::from_rgb(24, 33, 54))
             .stroke(egui::Stroke::new(
                 1.0_f32,
-                egui::Color32::from_rgb(51, 65, 85),
+                egui::Color32::from_rgb(47, 63, 94),
             ))
             .rounding(8.0)
-            .inner_margin(16.0)
+            .inner_margin(14.0)
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     if let Some(ref path) = self.send_file_path {
@@ -278,9 +341,10 @@ impl HeavyDropApp {
                             .to_string_lossy()
                             .to_string();
 
+                        ui.label(egui::RichText::new("📄").size(24.0));
                         ui.label(
-                            egui::RichText::new(format!("📄 {}", file_name))
-                                .size(18.0)
+                            egui::RichText::new(file_name)
+                                .size(16.0)
                                 .strong()
                                 .color(egui::Color32::from_rgb(248, 250, 252)),
                         );
@@ -290,12 +354,12 @@ impl HeavyDropApp {
                                 indicatif::HumanBytes(file_size),
                                 file_size as f64 / (1024.0 * 1024.0 * 1024.0)
                             ))
-                            .size(14.0)
+                            .size(13.0)
                             .color(egui::Color32::from_rgb(148, 163, 184)),
                         );
 
                         if !is_busy && self.send_session.is_none() {
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
                             if ui.button("Cambiar archivo").clicked() {
                                 if let Some(file) = rfd::FileDialog::new().pick_file() {
                                     self.send_file_path = Some(file);
@@ -303,17 +367,19 @@ impl HeavyDropApp {
                             }
                         }
                     } else {
+                        ui.label(egui::RichText::new("📁").size(24.0));
                         ui.label(
-                            egui::RichText::new("📁 Arrastra un archivo aquí")
-                                .size(17.0)
+                            egui::RichText::new("Arrastrá un archivo aquí")
+                                .size(15.0)
+                                .strong()
                                 .color(egui::Color32::from_rgb(226, 232, 240)),
                         );
                         ui.label(
-                            egui::RichText::new("o selecciona desde tu equipo (hasta 1 TB+)")
+                            egui::RichText::new("o hacé clic para seleccionar (hasta 1 TB+)")
                                 .size(12.0)
                                 .color(egui::Color32::from_rgb(148, 163, 184)),
                         );
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         if ui.button("Seleccionar archivo").clicked() {
                             if let Some(file) = rfd::FileDialog::new().pick_file() {
                                 self.send_file_path = Some(file);
@@ -323,7 +389,7 @@ impl HeavyDropApp {
                 });
             });
 
-        ui.add_space(12.0);
+        ui.add_space(10.0);
 
         // 2. Action: Create transfer OR display pairing code
         let session_clone = self.send_session.clone();
@@ -337,18 +403,18 @@ impl HeavyDropApp {
 
             // Large Code Display Box
             egui::Frame::group(ui.style())
-                .fill(egui::Color32::from_rgb(15, 23, 42))
+                .fill(egui::Color32::from_rgb(8, 12, 22))
                 .stroke(egui::Stroke::new(
                     1.5_f32,
                     egui::Color32::from_rgb(56, 189, 248),
                 ))
                 .rounding(8.0)
-                .inner_margin(14.0)
+                .inner_margin(12.0)
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
                             egui::RichText::new(session.code().formatted())
-                                .size(28.0)
+                                .size(24.0)
                                 .monospace()
                                 .strong()
                                 .color(egui::Color32::from_rgb(56, 189, 248)),
@@ -358,35 +424,20 @@ impl HeavyDropApp {
 
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                let copy_btn = ui.add_sized(
-                    [ui.available_width() - 100.0, 36.0],
-                    egui::Button::new(
-                        egui::RichText::new("📋 Copiar código")
-                            .size(14.0)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(2, 132, 199)),
-                );
-                if copy_btn.clicked() {
-                    ui.output_mut(|o| o.copied_text = session.code().formatted());
-                    self.show_toast("¡Código copiado al portapapeles!");
-                }
-
-                if ui
-                    .add_sized(
-                        [90.0, 36.0],
-                        egui::Button::new(
-                            egui::RichText::new("Cancelar")
-                                .color(egui::Color32::from_rgb(239, 68, 68)),
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.cancel_current_transfer();
-                }
-            });
+            let copy_btn = ui.add_sized(
+                [ui.available_width(), 38.0],
+                egui::Button::new(
+                    egui::RichText::new("📋 Copiar código")
+                        .size(14.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(2, 132, 199)),
+            );
+            if copy_btn.clicked() {
+                ui.output_mut(|o| o.copied_text = session.code().formatted());
+                self.show_toast("¡Código copiado al portapapeles!");
+            }
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -395,18 +446,27 @@ impl HeavyDropApp {
                         .size(12.0)
                         .color(egui::Color32::from_rgb(148, 163, 184)),
                 );
-                ui.label(
-                    egui::RichText::new("• Esperando que el receptor ingrese el código")
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(234, 179, 8)),
-                );
+
+                if !is_busy {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new("Cancelar")
+                                    .color(egui::Color32::from_rgb(239, 68, 68)),
+                            )
+                            .clicked()
+                        {
+                            self.cancel_current_transfer();
+                        }
+                    });
+                }
             });
         } else if self.send_file_path.is_some() && !is_busy {
             let start_btn = ui.add_sized(
-                [ui.available_width(), 44.0],
+                [ui.available_width(), 42.0],
                 egui::Button::new(
                     egui::RichText::new("⚡ Crear transferencia")
-                        .size(16.0)
+                        .size(15.0)
                         .strong()
                         .color(egui::Color32::WHITE),
                 )
@@ -419,7 +479,7 @@ impl HeavyDropApp {
         }
 
         if let Some(ref err) = self.send_error {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(format!("❌ {}", err))
                     .color(egui::Color32::from_rgb(239, 68, 68)),
@@ -427,9 +487,16 @@ impl HeavyDropApp {
         }
     }
 
-    fn render_receive_tab(&mut self, ui: &mut egui::Ui, is_busy: bool) {
-        ui.heading("Recibir archivo");
-        ui.add_space(6.0);
+    fn render_receive_panel(&mut self, ui: &mut egui::Ui, is_busy: bool) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("📥 Recibir")
+                    .size(17.0)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            );
+        });
+        ui.add_space(8.0);
 
         ui.label(
             egui::RichText::new("Ingresá el código del emisor")
@@ -440,7 +507,7 @@ impl HeavyDropApp {
 
         // Input Field for Code
         let code_edit = ui.add_sized(
-            [ui.available_width(), 40.0],
+            [ui.available_width(), 38.0],
             egui::TextEdit::singleline(&mut self.recv_code_input)
                 .hint_text("XXXX-XXXX-XXXX")
                 .font(egui::TextStyle::Monospace)
@@ -451,31 +518,14 @@ impl HeavyDropApp {
             self.recv_code_input = self.recv_code_input.to_ascii_uppercase();
         }
 
-        ui.add_space(10.0);
-
-        // Target folder
-        ui.horizontal(|ui| {
-            ui.label("Carpeta destino:");
-            ui.label(
-                egui::RichText::new(self.recv_output_dir.display().to_string())
-                    .color(egui::Color32::from_rgb(56, 189, 248))
-                    .strong(),
-            );
-            if !is_busy && ui.button("Cambiar").clicked() {
-                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                    self.recv_output_dir = dir;
-                }
-            }
-        });
-
-        ui.add_space(12.0);
+        ui.add_space(8.0);
 
         if !is_busy {
             let connect_btn = ui.add_sized(
-                [ui.available_width(), 44.0],
+                [ui.available_width(), 40.0],
                 egui::Button::new(
-                    egui::RichText::new("🔗 Usar código y conectar")
-                        .size(15.0)
+                    egui::RichText::new("🔗 Usar código")
+                        .size(14.0)
                         .strong()
                         .color(egui::Color32::WHITE),
                 )
@@ -500,17 +550,17 @@ impl HeavyDropApp {
             }
         }
 
-        ui.add_space(16.0);
+        ui.add_space(10.0);
 
-        // Card info
+        // File status preview box (matching mockup)
         egui::Frame::group(ui.style())
-            .fill(egui::Color32::from_rgb(30, 41, 59))
+            .fill(egui::Color32::from_rgb(24, 33, 54))
             .stroke(egui::Stroke::new(
                 1.0_f32,
-                egui::Color32::from_rgb(51, 65, 85),
+                egui::Color32::from_rgb(47, 63, 94),
             ))
             .rounding(8.0)
-            .inner_margin(14.0)
+            .inner_margin(12.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("📄");
@@ -519,11 +569,13 @@ impl HeavyDropApp {
                             .strong()
                             .color(egui::Color32::from_rgb(226, 232, 240)),
                     );
-                    ui.label(
-                        egui::RichText::new("- Se muestra tras conectarse")
-                            .color(egui::Color32::from_rgb(148, 163, 184)),
-                    );
                 });
+                ui.label(
+                    egui::RichText::new("Se muestra tras conectarse")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(
@@ -532,16 +584,42 @@ impl HeavyDropApp {
                             .strong(),
                     );
                     ui.label(
-                        egui::RichText::new(
-                            "Conexión cifrada de extremo a extremo (ChaCha20-Poly1305 + X25519)",
-                        )
-                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                        egui::RichText::new("Conexión cifrada")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(148, 163, 184)),
                     );
                 });
             });
 
+        ui.add_space(8.0);
+
+        // Target folder selector
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Carpeta:")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
+            );
+            let dir_str = self.recv_output_dir.display().to_string();
+            let truncated_dir = if dir_str.len() > 28 {
+                format!("...{}", &dir_str[dir_str.len() - 25..])
+            } else {
+                dir_str
+            };
+            ui.label(
+                egui::RichText::new(truncated_dir)
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(56, 189, 248)),
+            );
+            if !is_busy && ui.small_button("Cambiar").clicked() {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    self.recv_output_dir = dir;
+                }
+            }
+        });
+
         if let Some(ref err) = self.recv_error {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(format!("❌ {}", err))
                     .color(egui::Color32::from_rgb(239, 68, 68)),
@@ -555,7 +633,7 @@ impl HeavyDropApp {
         progress: &heavydrop::transfer_state::TransferProgress,
     ) {
         egui::Frame::group(ui.style())
-            .fill(egui::Color32::from_rgb(30, 41, 59))
+            .fill(egui::Color32::from_rgb(24, 33, 54))
             .stroke(egui::Stroke::new(
                 1.0_f32,
                 egui::Color32::from_rgb(56, 189, 248),
