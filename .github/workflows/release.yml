@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Nombre del Tag para la Release (ej. v0.2.0)'
+        description: 'Nombre del Tag para la Release (ej. v0.1.0)'
         required: true
-        default: 'v0.2.0'
+        default: 'v0.1.0'
       draft:
         description: 'Crear como borrador (Draft)'
         type: boolean
@@ -48,10 +48,18 @@ jobs:
         shell: pwsh
         run: |
           $TAG = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.tag_name }}" }
+          if (-not $TAG -or $TAG.Trim() -eq "") { $TAG = "v0.1.0" }
+          "RELEASE_TAG=$TAG" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
           $ARCHIVE = "heavydrop-${TAG}-windows-x64.zip"
 
           New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "target/x86_64-pc-windows-msvc/release/heavydrop.exe" -Destination "staging/heavydrop.exe"
+
+          $binary = "target/x86_64-pc-windows-msvc/release/heavydrop.exe"
+          if (-not (Test-Path $binary)) {
+              $binary = "target/release/heavydrop.exe"
+          }
+          Copy-Item $binary -Destination "staging/heavydrop.exe"
           if (Test-Path "README.md") { Copy-Item "README.md" -Destination "staging/README.md" }
 
           New-Item -ItemType Directory -Force -Path artifacts
@@ -61,13 +69,12 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -Path $ARCHIVE).Hash.ToLower()
           "$hash  $ARCHIVE" | Out-File -Encoding ascii -NoNewline "$ARCHIVE.sha256"
 
-          Write-Output "archive_name=$ARCHIVE" >> $env:GITHUB_OUTPUT
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag_name }}
-          name: HeavyDrop ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: HeavyDrop ${{ env.RELEASE_TAG }}
           files: artifacts/*
           generate_release_notes: true
           draft: ${{ inputs.draft || false }}
