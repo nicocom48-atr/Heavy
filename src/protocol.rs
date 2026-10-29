@@ -8,11 +8,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-pub const PROTOCOL_VERSION: u32 = 2;
-pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP02";
+pub const PROTOCOL_VERSION: u32 = 3;
+pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP03";
 pub const MIN_CHUNK_SIZE: u32 = 64 * 1024; // 64 KB
 pub const MAX_CHUNK_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
-#[allow(dead_code)]
 pub const DEFAULT_CHUNK_SIZE: u32 = 4 * 1024 * 1024; // 4 MB chunk size for high-throughput 50GB transfers
 pub const END_OF_STREAM_OFFSET: u64 = u64::MAX;
 
@@ -22,13 +21,14 @@ pub const CHUNK_TIMEOUT: Duration = Duration::from_secs(45);
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HandshakeOffer {
     pub protocol_version: u32,
+    pub session_id: String,
     pub sender_public_key: [u8; 32],
+    pub session_salt: [u8; 32],
     pub file_name: String,
     pub file_size: u64,
     pub chunk_size: u32,
     pub file_hash: String,
-    pub auth_required: bool,
-    pub auth_challenge: [u8; 32],
+    pub sender_auth_proof: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -37,7 +37,7 @@ pub struct HandshakeResponse {
     pub receiver_public_key: [u8; 32],
     pub accepted: bool,
     pub resume_offset: u64,
-    pub auth_proof: Option<[u8; 32]>,
+    pub receiver_auth_proof: [u8; 32],
     pub message: Option<String>,
 }
 
@@ -64,30 +64,33 @@ pub fn generate_keypair() -> Result<(StaticSecret, [u8; 32])> {
     Ok((secret, *public.as_bytes()))
 }
 
-/// Derive a symmetric ChaCha20-Poly1305 session cipher from Diffie-Hellman shared secret and optional auth token
+/// Derive a symmetric ChaCha20-Poly1305 session cipher mixing Diffie-Hellman, auth key, and session salt
 pub fn derive_session_cipher(
     secret: &StaticSecret,
     peer_public: &[u8; 32],
-    token: Option<&str>,
+    auth_key: &[u8; 32],
+    session_salt: &[u8; 32],
 ) -> ChaCha20Poly1305 {
     let peer_pub = PublicKey::from(*peer_public);
     let shared = secret.diffie_hellman(&peer_pub);
-    let mut ikm = Vec::with_capacity(64);
+    let mut ikm = Vec::with_capacity(32 + 32 + 32);
     ikm.extend_from_slice(shared.as_bytes());
-    if let Some(tok) = token {
-        ikm.extend_from_slice(tok.as_bytes());
-    }
-    let key_bytes = blake3::derive_key("heavydrop-v2-transport-key", &ikm);
+    ikm.extend_from_slice(auth_key);
+    ikm.extend_from_slice(session_salt);
+    let key_bytes = blake3::derive_key("heavydrop-v3-transport-key", &ikm);
     ChaCha20Poly1305::new((&key_bytes).into())
 }
 
-/// Encrypt a chunk payload using ChaCha20-Poly1305 AEAD
+/// Encrypt a chunk payload using ChaCha20-Poly1305 AEAD with direction and session salt nonce isolation
 pub fn encrypt_chunk(
     cipher: &ChaCha20Poly1305,
+    session_salt: &[u8; 32],
     chunk_index: u64,
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
     let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[0] = 0x01; // sender->receiver direction
+    nonce_bytes[1..4].copy_from_slice(&session_salt[0..3]);
     nonce_bytes[4..12].copy_from_slice(&chunk_index.to_be_bytes());
     let nonce = (&nonce_bytes).into();
     cipher
@@ -98,10 +101,13 @@ pub fn encrypt_chunk(
 /// Decrypt a chunk payload using ChaCha20-Poly1305 AEAD and verify Poly1305 MAC tag
 pub fn decrypt_chunk(
     cipher: &ChaCha20Poly1305,
+    session_salt: &[u8; 32],
     chunk_index: u64,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
     let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[0] = 0x01; // sender->receiver direction
+    nonce_bytes[1..4].copy_from_slice(&session_salt[0..3]);
     nonce_bytes[4..12].copy_from_slice(&chunk_index.to_be_bytes());
     let nonce = (&nonce_bytes).into();
     cipher
@@ -109,25 +115,9 @@ pub fn decrypt_chunk(
         .map_err(|e| anyhow::anyhow!("Decryption / AEAD authentication tag failure: {}", e))
 }
 
-/// Generate a cryptographically secure random 32-byte challenge for authentication
-pub fn generate_auth_challenge() -> Result<[u8; 32]> {
-    let mut challenge = [0u8; 32];
-    getrandom::getrandom(&mut challenge)
-        .map_err(|e| anyhow::anyhow!("Failed to generate secure cryptographic challenge: {}", e))?;
-    Ok(challenge)
-}
-
-/// Compute HMAC-like authentication proof from token and challenge using BLAKE3 keyed hashing
-pub fn compute_auth_proof(token: &str, challenge: &[u8; 32]) -> [u8; 32] {
-    let key = blake3::hash(token.as_bytes());
-    let proof = blake3::keyed_hash(key.as_bytes(), challenge);
-    *proof.as_bytes()
-}
-
-/// Cryptographically verify authentication proof in constant time to prevent timing attacks
-pub fn verify_auth_proof(token: &str, challenge: &[u8; 32], proof: &[u8; 32]) -> bool {
-    let expected = compute_auth_proof(token, challenge);
-    constant_time_eq::constant_time_eq(&expected, proof)
+/// Verify mutual authentication proof in constant time
+pub fn verify_proof_constant_time(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
+    constant_time_eq::constant_time_eq(expected, actual)
 }
 
 /// Sanitize file name to strictly prevent directory traversal, illegal chars, and Windows device names
@@ -211,21 +201,31 @@ pub async fn receive_handshake_offer<R: AsyncReadExt + Unpin>(
 ) -> Result<HandshakeOffer> {
     tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         let mut magic = [0u8; 8];
-        reader.read_exact(&mut magic).await.context("Failed to read magic bytes")?;
+        reader
+            .read_exact(&mut magic)
+            .await
+            .context("Failed to read magic bytes")?;
 
         if &magic != MAGIC_BYTES {
-            bail!("Protocol mismatch: incompatible peer magic bytes. Make sure both peers run HeavyDrop v2.");
+            bail!("Protocol mismatch: incompatible peer magic bytes. Make sure both peers run HeavyDrop v3.");
         }
 
-        let len = reader.read_u32().await.context("Failed to read handshake length")?;
+        let len = reader
+            .read_u32()
+            .await
+            .context("Failed to read handshake length")?;
         if len > 64 * 1024 {
             bail!("Handshake payload unexpectedly large ({} bytes)", len);
         }
 
         let mut buf = vec![0u8; len as usize];
-        reader.read_exact(&mut buf).await.context("Failed to read handshake payload")?;
+        reader
+            .read_exact(&mut buf)
+            .await
+            .context("Failed to read handshake payload")?;
 
-        let offer: HandshakeOffer = serde_json::from_slice(&buf).context("Failed to parse handshake JSON")?;
+        let offer: HandshakeOffer =
+            serde_json::from_slice(&buf).context("Failed to parse handshake JSON")?;
 
         if offer.protocol_version != PROTOCOL_VERSION {
             bail!(
@@ -357,45 +357,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_x25519_key_exchange_and_aead_encryption() {
+    fn test_x25519_key_exchange_and_aead_encryption_v3() {
         let (alice_sec, alice_pub) = generate_keypair().unwrap();
         let (bob_sec, bob_pub) = generate_keypair().unwrap();
 
-        let token = Some("secret-token-123");
-        let alice_cipher = derive_session_cipher(&alice_sec, &bob_pub, token);
-        let bob_cipher = derive_session_cipher(&bob_sec, &alice_pub, token);
+        let auth_key = [0x5Au8; 32];
+        let session_salt = [0x7Eu8; 32];
 
-        let data = b"HeavyDrop 50GB massive P2P transfer test payload!";
-        let chunk_index = 42;
+        let alice_cipher = derive_session_cipher(&alice_sec, &bob_pub, &auth_key, &session_salt);
+        let bob_cipher = derive_session_cipher(&bob_sec, &alice_pub, &auth_key, &session_salt);
 
-        let encrypted = encrypt_chunk(&alice_cipher, chunk_index, data).unwrap();
+        let data = b"HeavyDrop v3 code-based P2P encrypted payload!";
+        let chunk_index = 0;
+
+        let encrypted = encrypt_chunk(&alice_cipher, &session_salt, chunk_index, data).unwrap();
         assert_ne!(&encrypted, data);
 
-        let decrypted = decrypt_chunk(&bob_cipher, chunk_index, &encrypted).unwrap();
+        let decrypted = decrypt_chunk(&bob_cipher, &session_salt, chunk_index, &encrypted).unwrap();
         assert_eq!(&decrypted, data);
 
-        // Wrong token fails decryption tag verification
-        let charlie_cipher = derive_session_cipher(&bob_sec, &alice_pub, Some("wrong-token"));
-        assert!(decrypt_chunk(&charlie_cipher, chunk_index, &encrypted).is_err());
+        // Wrong auth key fails decryption MAC
+        let bad_key = [0x00u8; 32];
+        let charlie_cipher = derive_session_cipher(&bob_sec, &alice_pub, &bad_key, &session_salt);
+        assert!(decrypt_chunk(&charlie_cipher, &session_salt, chunk_index, &encrypted).is_err());
 
         // Tampered ciphertext fails Poly1305 MAC check
         let mut tampered = encrypted.clone();
-        tampered[10] ^= 0x42;
-        assert!(decrypt_chunk(&bob_cipher, chunk_index, &tampered).is_err());
-    }
-
-    #[test]
-    fn test_auth_proof_valid_and_invalid() {
-        let challenge = generate_auth_challenge().expect("challenge generation should succeed");
-        let token = "super_secure_pass_456!";
-        let proof = compute_auth_proof(token, &challenge);
-
-        assert!(verify_auth_proof(token, &challenge, &proof));
-        assert!(!verify_auth_proof("wrong_password", &challenge, &proof));
-
-        let mut tampered_challenge = challenge;
-        tampered_challenge[0] ^= 0xFF;
-        assert!(!verify_auth_proof(token, &tampered_challenge, &proof));
+        tampered[5] ^= 0xEE;
+        assert!(decrypt_chunk(&bob_cipher, &session_salt, chunk_index, &tampered).is_err());
     }
 
     #[test]

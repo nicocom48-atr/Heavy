@@ -1,10 +1,74 @@
-# ⚡ HeavyDrop: Transferencia P2P de Archivos Masivos (50GB+) en Rust
+# ⚡ HeavyDrop: Transferencia P2P Masiva (50GB+) mediante Códigos Temporales
 
-**HeavyDrop** es una herramienta en Rust diseñada específicamente para la transferencia punto a punto (P2P) de archivos de cualquier tamaño (50 GB, 100 GB, 1 TB o más) con máxima velocidad, cifrado de transporte AEAD de extremo a extremo, verificación estricta de integridad y reanudación inteligente.
+**HeavyDrop** es una herramienta en Rust diseñada para la transferencia punto a punto (P2P) de archivos de cualquier tamaño (50 GB, 100 GB, 1 TB o más) de forma rápida, privada y sin complicaciones de red. 
 
-Cuenta con una **interfaz gráfica nativa de escritorio (GUI)** moderna y minimalista, además de una interfaz de línea de comandos (CLI) completa para terminales y automatizaciones.
+Dos usuarios pueden conectarse y transferir archivos compartiendo **únicamente un código temporal único**, sin necesidad de conocer, copiar ni configurar direcciones IP, puertos o comandos de red.
 
-> **Nota de Distribución Oficial:** Las versiones binarias oficiales precompiladas de HeavyDrop se distribuyen **exclusivamente para Windows x64**. El código base está escrito en Rust multiplataforma para facilitar su compilación local en otros entornos si se desea.
+> **Nota de Distribución Oficial:** Las versiones oficiales precompiladas de HeavyDrop se distribuyen **exclusivamente para Windows x64**.
+
+---
+
+## 🚀 Experiencia de Usuario Simplificada
+
+### 📤 Emisor
+1. Abre HeavyDrop.
+2. Selecciona o arrastra el archivo (hasta 1 TB+).
+3. Pulsa **"Crear transferencia"**.
+4. La aplicación genera un código único de 12 caracteres (ejemplo: `KD7M-9Q2P-W8RX`) con validez de 15 minutos.
+5. Comparte ese código con el receptor.
+
+### 📥 Receptor
+1. Abre HeavyDrop.
+2. Introduce el código en la pestaña **"Recibir"**.
+3. Pulsa **"Usar código y conectar"**.
+4. El archivo comienza a descargarse automáticamente con verificación en tiempo real.
+
+---
+
+## 🌐 Conectividad Inteligente en 3 Vías
+
+El motor de HeavyDrop resuelve automáticamente la mejor ruta de conexión disponible de forma transparente para el usuario:
+
+```text
+               [ Emisor HeavyDrop ] 
+                        │
+       ┌────────────────┼────────────────┐
+       ▼                ▼                ▼
+[ 1. Directa LAN ]   [ 2. Directa WAN ]   [ 3. Relay Cifrado E2E ]
+Beacon UDP Ciego     Candidatos Públicos    Fallback para CGNAT/Firewalls
+Local en ms          P2P por Internet       100% Cifrado E2E (Dumb Pipe)
+       ▲                ▲                ▲
+       └────────────────┼────────────────┘
+                        │
+              [ Receptor HeavyDrop ]
+```
+
+1. **Conexión Directa Local (LAN):** Detección instantánea en la misma red local mediante baliza UDP con ticket ciego. No requiere acceso a Internet ni expone datos a otros equipos de la red Wi-Fi.
+2. **Conexión Directa por Internet (P2P):** Intercambio de candidatos de red a través de un servidor ligero de señalización (*rendezvous*).
+3. **Fallback mediante Relay Cifrado:** Si ambos equipos se encuentran detrás de firewalls restrictivos o CGNAT simétrico, la transferencia se canaliza a través del servidor como un túnel ciego. **Todo el contenido viaja cifrado de extremo a extremo con ChaCha20-Poly1305**, de modo que el relay jamás tiene acceso a las claves ni al contenido del archivo.
+
+---
+
+## 🔒 Arquitectura y Seguridad Criptográfica
+
+1. **Códigos de Emparejamiento Seguros y Legibles:**
+   - 12 caracteres en Base32 Crockford (`XXXX-XXXX-XXXX`), excluyendo caracteres ambiguos (`I`, `L`, `O`, `U`).
+   - 60 bits de entropía real generados mediante entropía criptográfica del sistema operativo (`getrandom`).
+   - Caducidad automática a los 15 minutos e invalidación de un solo uso para prevenir ataques de repetición (*replay attacks*).
+2. **Autenticación Mutua de Conocimiento Cero (Zero-Disclosure):**
+   - El código nunca se envía en texto claro ni por la red local ni al servidor de señalización.
+   - Ambas partes generan y verifican pruebas criptográficas independientes con BLAKE3 en tiempo constante (`constant_time_eq`), impidiendo ataques de intermediario (*Man-In-The-Middle*) o servidores de señalización maliciosos.
+3. **Cifrado de Transporte AEAD (ChaCha20-Poly1305 + X25519):**
+   - Intercambio de claves efímero **X25519** (*Perfect Forward Secrecy*).
+   - Aislamiento de nonces por dirección y salt de sesión único.
+   - Cada bloque de 4 MB se autentica con Poly1305 y hash BLAKE3 antes de guardarse en disco.
+4. **Reanudación Verificable con Archivos `.part`:**
+   - Si se corta la conexión a los 40 GB de un archivo de 50 GB, el receptor verifica el último fragmento local guardado y reanuda exactamente desde ese punto. Si hubo corrupción previa en disco, descarta el tramo inválido automáticamente.
+   - Renombrado atómico al completar el 100% y verificar la integridad global.
+5. **Consumo de Memoria Acotado (< 20 MB RAM):**
+   - Streaming continuo por fragmentos de 4 MB. Nunca se carga el archivo completo en memoria.
+6. **Protección Estricta contra Path Traversal:**
+   - Bloqueo de rutas relativas (`../`) y nombres reservados del sistema Windows (`CON`, `PRN`, `AUX`, `NUL`, etc.).
 
 ---
 
@@ -12,97 +76,59 @@ Cuenta con una **interfaz gráfica nativa de escritorio (GUI)** moderna y minima
 
 Al abrir `heavydrop.exe` sin argumentos (o haciendo doble clic), se inicia la aplicación de escritorio simplificada:
 
-- 📤 **Pestaña Enviar:**
-  - **Arrastrar y soltar (Drag and Drop):** Arrastra cualquier archivo directamente a la ventana para prepararlo al instante.
-  - **Descubrimiento Local Automático:** Emite un beacon en la red local (LAN) para que otros equipos te detecten sin necesidad de copiar IPs manualmente.
-  - **Opciones Avanzadas Plegables:** Configura puerto TCP, tamaño de chunks (MB), token de acceso o prehash únicamente si lo necesitas.
-- 📥 **Pestaña Recibir:**
-  - **Detección de Equipos en Red:** Lista automática de emisores activos en tu red local con botón de conexión en 1 clic.
-  - **Conexión Manual:** Campo directo para ingresar la IP o dirección del emisor.
-- 📊 **Monitor Unificado de Transferencia:**
-  - Muestra dispositivo/peer, nombre de archivo, barra de progreso porcentual, velocidad en tiempo real (MB/s) y tiempo restante estimado (ETA).
-  - **Cancelación Cooperativa:** Botón de cancelación limpia que detiene la transferencia de inmediato sin dejar archivos inconsistentes.
-
----
-
-## 🔒 Arquitectura y Seguridad
-
-1. **Cifrado de Transporte AEAD (ChaCha20-Poly1305 + X25519):**
-   - Cada sesión de transferencia negocia un secreto compartido efímero mediante un intercambio de claves **X25519** (Perfect Forward Secrecy).
-   - Todos los chunks y tramas de datos viajan cifrados y autenticados con **ChaCha20-Poly1305 AEAD**. Cualquier manipulación en tránsito es detectada y rechazada de inmediato.
-2. **Autenticación Criptográfica de Conocimiento Cero (Challenge-Response):**
-   - El token secreto nunca se envía en texto claro por la red.
-   - El receptor genera una prueba BLAKE3 basada en un desafío (*challenge*) del emisor y el token compartido; el emisor valida la prueba en tiempo constante (`constant_time_eq`) para prevenir ataques de temporización.
-3. **Reanudación Segura con Archivos `.part` y Metadatos:**
-   - Las transferencias incompletas se almacenan como `archivo.part` acompañadas de `archivo.part.meta`.
-   - Si la red se corta tras 40 GB de un archivo de 50 GB, el receptor verifica el último fragmento local guardado. Si coincide, reanuda exactamente desde ese punto. Si hubo corrupción en disco, descarta el tramo inválido automáticamente.
-   - Una vez alcanzado el 100% y validado el hash global, el archivo `.part` se renombra atómicamente a su nombre final.
-4. **Protección Estricta contra Path Traversal:**
-   - Sanitización rigurosa de nombres de archivo contra rutas relativas (`../`), separadores de directorio y nombres de dispositivos reservados de Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`).
-5. **Memoria RAM Constante (< 20 MB):**
-   - Streaming por bloques (*chunks* de 4 MB) de flujo acotado. Nunca se carga el archivo entero en memoria.
-6. **Descubrimiento Local sin la Nube:**
-   - Baliza UDP ligera en red local sin servidores centrales, telemetría ni intermediarios.
-
----
-
-## 📦 Descargas Oficiales (Windows x64)
-
-Los binarios oficiales se publican automáticamente en la sección de **[Releases en GitHub](https://github.com/nicocom48-atr/Heavy/releases)**:
-
-- 🪟 **Windows x64:** `heavydrop-vX.Y.Z-windows-x64.zip` (incluye `heavydrop.exe` optimizado y su checksum `heavydrop-vX.Y.Z-windows-x64.zip.sha256`).
-
-Para verificar la integridad del archivo descargado en PowerShell:
-```powershell
-Get-FileHash -Algorithm SHA256 heavydrop-vX.Y.Z-windows-x64.zip
-```
+- 📤 **Enviar:** Arrastra cualquier archivo, pulsa "Crear transferencia", copia el código con 1 clic y observa la cuenta regresiva.
+- 📥 **Recibir:** Ingresa el código recibido, selecciona la carpeta de destino y descarga con un solo clic.
+- 📊 **Monitor:** Velocidad en tiempo real (MB/s), bytes transferidos, porcentaje, tiempo restante (ETA) y etiqueta de conectividad (*Directa LAN*, *Directa Internet* o *Relay*).
 
 ---
 
 ## 📖 Uso por Línea de Comandos (CLI)
 
-### 1. Enviar un archivo
+### 1. Enviar un archivo (genera el código automáticamente)
 
 ```bash
 heavydrop send "F:\backups\archivo_50gb.iso"
 ```
 
-Opciones principales:
-- `--token <PASSWORD>`: Exige autenticación criptográfica al receptor.
-- `--port <PORT>`: Especifica el puerto TCP (por defecto `7878`).
-- `--chunk-size-mb <MB>`: Tamaño de bloque en MB (por defecto `4`).
-- `--no-prehash`: Comienza la transferencia de inmediato sin esperar el hash previo de archivos gigantes.
-
-### 2. Recibir un archivo
-
-```bash
-heavydrop recv 192.168.1.45:7878
+Salida:
+```text
+================ [ HEAVYDROP P2P TRANSFER ] ================
+  Archivo : archivo_50gb.iso (50.00 GB)
+  Código  : KD7M-9Q2P-W8RX
+  Estado  : Esperando que el receptor ingrese el código (14:59)
+============================================================
 ```
 
-Opciones principales:
-- `--output-dir <DIR>`: Carpeta donde guardar el archivo (por defecto directorio actual).
-- `--token <PASSWORD>`: Clave de autenticación si el emisor la requirió.
-- `--force`: Sobrescribe archivos existentes sin preguntar.
+### 2. Recibir un archivo usando el código
+
+```bash
+heavydrop recv KD7M-9Q2P-W8RX --output-dir "D:\Descargas"
+```
+
+El receptor buscará al emisor por red local y señalización de Internet automáticamente.
+
+### 3. Servidor de Señalización y Relay (Opcional)
+
+Si deseas alojar tu propio servicio de señalización y relay en un servidor o VPS:
+
+```bash
+heavydrop server --port 7880
+```
+
+Puedes configurar a los clientes para usar tu servidor mediante la variable de entorno:
+```powershell
+$env:HEAVYDROP_SIGNAL_SERVER = "tu-servidor.com:7880"
+```
 
 ---
 
-## 🛠️ Compilación desde el Código Fuente
+## 📦 Descargas Oficiales (Windows x64)
 
-Si deseas compilar HeavyDrop desde el código fuente con Rust:
+Los binarios oficiales optimizados se publican automáticamente en la sección de **[Releases en GitHub](https://github.com/nicocom48-atr/Heavy/releases)**:
 
-1. Clona el repositorio:
-   ```bash
-   git clone https://github.com/nicocom48-atr/Heavy.git
-   cd Heavy
-   ```
-2. Compila en modo Release:
-   ```bash
-   cargo build --release
-   ```
-3. El ejecutable se genera en:
-   - `target/release/heavydrop.exe` (Windows)
+- 🪟 **Windows x64:** `heavydrop-vX.Y.Z-windows-x64.zip` (incluye `heavydrop.exe` optimizado y su checksum SHA-256).
 
-Para ejecutar la suite completa de pruebas:
-```bash
-cargo test
+Para comprobar la integridad del archivo descargado en PowerShell:
+```powershell
+Get-FileHash -Algorithm SHA256 heavydrop-vX.Y.Z-windows-x64.zip
 ```

@@ -7,30 +7,29 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
+use crate::pairing::PairingCode;
+use crate::protocol::PROTOCOL_VERSION;
+
 pub const DISCOVERY_PORT: u16 = 7879;
-pub const APP_ID: &str = "heavydrop";
+pub const APP_ID: &str = "heavydrop-p2p";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct PeerAnnouncement {
+pub struct BlindBeaconAnnouncement {
     pub app: String,
     pub version: u32,
-    pub device_name: String,
-    pub port: u16,
-    pub file_name: String,
-    pub file_size: u64,
+    pub blind_ticket: [u8; 32],
+    pub listen_port: u16,
 }
 
 #[derive(Debug, Clone)]
-pub struct DiscoveredPeer {
-    pub announcement: PeerAnnouncement,
-    pub address: String,
+pub struct DiscoveredBeacon {
+    pub sender_addr: SocketAddr,
     pub last_seen: Instant,
 }
 
-/// Spawns a background beacon broadcasting sender details to the local network
-pub fn spawn_beacon(
-    file_name: String,
-    file_size: u64,
+/// Spawns a background UDP beacon broadcasting a blind session ticket on LAN
+pub fn spawn_blind_beacon(
+    blind_ticket: [u8; 32],
     listen_port: u16,
     cancel_signal: Arc<AtomicBool>,
 ) {
@@ -41,18 +40,11 @@ pub fn spawn_beacon(
         };
         let _ = socket.set_broadcast(true);
 
-        let device_name = match local_ip_address::local_ip() {
-            Ok(ip) => format!("HeavyDrop ({})", ip),
-            Err(_) => "HeavyDrop Peer".to_string(),
-        };
-
-        let announcement = PeerAnnouncement {
+        let announcement = BlindBeaconAnnouncement {
             app: APP_ID.to_string(),
-            version: crate::protocol::PROTOCOL_VERSION,
-            device_name,
-            port: listen_port,
-            file_name,
-            file_size,
+            version: PROTOCOL_VERSION,
+            blind_ticket,
+            listen_port,
         };
 
         let json_bytes = match serde_json::to_vec(&announcement) {
@@ -60,29 +52,31 @@ pub fn spawn_beacon(
             Err(_) => return,
         };
 
-        let broadcast_addr: SocketAddr = format!("255.255.255.255:{}", DISCOVERY_PORT)
-            .parse()
-            .expect("Invalid broadcast addr");
+        let broadcast_addr: SocketAddr = match format!("255.255.255.255:{}", DISCOVERY_PORT).parse()
+        {
+            Ok(a) => a,
+            Err(_) => return,
+        };
 
         while !cancel_signal.load(Ordering::Relaxed) {
             let _ = socket.send_to(&json_bytes, broadcast_addr).await;
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     });
 }
 
-/// Discovers senders advertising on the local network
+/// Listens for LAN beacons and resolves pairing codes locally in milliseconds
 pub struct DiscoveryService {
-    peers: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
+    beacons: Arc<Mutex<HashMap<[u8; 32], DiscoveredBeacon>>>,
     cancel_signal: Arc<AtomicBool>,
 }
 
 impl DiscoveryService {
     pub fn new() -> Self {
-        let peers = Arc::new(Mutex::new(HashMap::new()));
+        let beacons = Arc::new(Mutex::new(HashMap::new()));
         let cancel_signal = Arc::new(AtomicBool::new(false));
 
-        let peers_clone = peers.clone();
+        let beacons_clone = beacons.clone();
         let cancel_clone = cancel_signal.clone();
 
         let task = async move {
@@ -97,15 +91,14 @@ impl DiscoveryService {
                 tokio::select! {
                     recv_res = socket.recv_from(&mut buf) => {
                         if let Ok((len, src)) = recv_res {
-                            if let Ok(ann) = serde_json::from_slice::<PeerAnnouncement>(&buf[..len]) {
-                                if ann.app == APP_ID && ann.version == crate::protocol::PROTOCOL_VERSION {
-                                    let peer_addr = format!("{}:{}", src.ip(), ann.port);
-                                    let mut map = peers_clone.lock();
+                            if let Ok(ann) = serde_json::from_slice::<BlindBeaconAnnouncement>(&buf[..len]) {
+                                if ann.app == APP_ID && ann.version == PROTOCOL_VERSION {
+                                    let mut map = beacons_clone.lock();
+                                    let sender_addr = SocketAddr::new(src.ip(), ann.listen_port);
                                     map.insert(
-                                        peer_addr.clone(),
-                                        DiscoveredPeer {
-                                            announcement: ann,
-                                            address: peer_addr,
+                                        ann.blind_ticket,
+                                        DiscoveredBeacon {
+                                            sender_addr,
                                             last_seen: Instant::now(),
                                         },
                                     );
@@ -114,9 +107,9 @@ impl DiscoveryService {
                         }
                     }
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                        // Clean peers unseen for more than 4 seconds
-                        let mut map = peers_clone.lock();
-                        map.retain(|_, p| p.last_seen.elapsed() < Duration::from_secs(5));
+                        // Purge expired beacons unseen for more than 5 seconds
+                        let mut map = beacons_clone.lock();
+                        map.retain(|_, b| b.last_seen.elapsed() < Duration::from_secs(5));
                     }
                 }
             }
@@ -127,16 +120,28 @@ impl DiscoveryService {
         }
 
         Self {
-            peers,
+            beacons,
             cancel_signal,
         }
     }
 
-    pub fn get_active_peers(&self) -> Vec<DiscoveredPeer> {
-        let map = self.peers.lock();
-        let mut list: Vec<DiscoveredPeer> = map.values().cloned().collect();
-        list.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
-        list
+    /// Check if a sender for the given code is actively advertising on the local network
+    pub fn check_local(&self, code: &PairingCode) -> Option<SocketAddr> {
+        let ticket = code.lan_blind_ticket();
+        let map = self.beacons.lock();
+        map.get(&ticket).map(|b| b.sender_addr)
+    }
+
+    /// Actively listen on LAN for up to `timeout` looking for a sender with this pairing code
+    pub async fn resolve_local(&self, code: &PairingCode, timeout: Duration) -> Option<SocketAddr> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Some(addr) = self.check_local(code) {
+                return Some(addr);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
     }
 }
 

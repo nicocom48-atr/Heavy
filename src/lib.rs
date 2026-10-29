@@ -1,9 +1,14 @@
+pub mod connectivity;
 pub mod discovery;
 pub mod integrity;
 pub mod manager;
 pub mod network;
+pub mod pairing;
 pub mod part_file;
 pub mod protocol;
 pub mod receiver;
 pub mod sender;
+pub mod server;
+pub mod session;
+pub mod signaling;
 pub mod transfer_state;

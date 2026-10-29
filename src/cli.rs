@@ -6,7 +6,7 @@ use std::path::PathBuf;
     name = "heavydrop",
     author = "HeavyDrop Contributors",
     version,
-    about = "⚡ Ultra-fast P2P file transfer tool optimized for huge files (50GB+) in Rust with native GUI and CLI."
+    about = "⚡ Transferencia de archivos P2P masivos (50GB+) mediante códigos temporales únicos sin configuración de IPs."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -15,52 +15,51 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Send a file to a peer over P2P network
+    /// Enviar un archivo generando un código temporal de conexión
     Send {
-        /// Path to the file to send
+        /// Ruta al archivo a transferir
         #[arg(value_name = "FILE")]
         file: PathBuf,
 
-        /// Port to listen on
-        #[arg(short, long, default_value_t = 7878)]
-        port: u16,
-
-        /// Network interface to bind
-        #[arg(short, long, default_value = "0.0.0.0")]
-        bind: String,
-
-        /// Chunk size in Megabytes (recommended 4 to 16 for 50GB files)
-        #[arg(short, long, default_value_t = 4)]
-        chunk_size_mb: u32,
-
-        /// Optional secret security token to authenticate the receiver
-        #[arg(short, long)]
-        token: Option<String>,
-
-        /// Skip upfront full-file hashing before transfer (chunks are still verified in transit)
+        /// Omitir el hash previo del archivo completo (los bloques se siguen verificando en tránsito)
         #[arg(long)]
         no_prehash: bool,
+
+        /// Avanzado: Puerto TCP preferido para conexiones entrantes (por defecto: 7878)
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+
+        /// Avanzado: Servidor de señalización personalizado (host:puerto)
+        #[arg(long)]
+        signal_server: Option<String>,
     },
 
-    /// Receive a file from a peer over P2P network
+    /// Recibir un archivo utilizando el código temporal compartido por el emisor
     Recv {
-        /// Peer sender address (e.g., 192.168.1.50:7878 or your-ip:7878)
-        #[arg(value_name = "PEER_ADDRESS")]
-        address: String,
+        /// Código de conexión temporal (ej. KD7M-9Q2P-W8RX)
+        #[arg(value_name = "CODE")]
+        code: String,
 
-        /// Directory where the received file will be saved
+        /// Directorio donde se guardará el archivo recibido (por defecto: carpeta actual)
         #[arg(short, long, default_value = ".")]
         output_dir: PathBuf,
 
-        /// Secret security token (if sender configured one)
-        #[arg(short, long)]
-        token: Option<String>,
-
-        /// Force overwrite: ignore existing partial file and download from scratch
+        /// Forzar sobrescritura: ignora descargas parciales existentes
         #[arg(short, long)]
         force: bool,
+
+        /// Avanzado: Servidor de señalización personalizado (host:puerto)
+        #[arg(long)]
+        signal_server: Option<String>,
     },
 
-    /// Launch the native desktop window GUI
+    /// Ejecutar el servidor ligero de señalización y relay (rendezvous)
+    Server {
+        /// Puerto TCP para escuchar conexiones de señalización y relay (por defecto: 7880)
+        #[arg(short, long, default_value_t = 7880)]
+        port: u16,
+    },
+
+    /// Abrir la interfaz gráfica de escritorio (GUI)
     Gui,
 }

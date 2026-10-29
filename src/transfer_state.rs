@@ -8,10 +8,30 @@ pub enum TransferRole {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionType {
+    None,
+    DirectLocal,
+    DirectInternet,
+    Relay,
+}
+
+impl ConnectionType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ConnectionType::None => "Desconectado",
+            ConnectionType::DirectLocal => "Conexión directa local (LAN)",
+            ConnectionType::DirectInternet => "Conexión directa por Internet (P2P)",
+            ConnectionType::Relay => "Conexión cifrada mediante relay",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStatus {
     Idle,
     Preparing,
     WaitingForPeer,
+    Connecting,
     Connected,
     Transferring,
     Completed,
@@ -23,6 +43,9 @@ pub enum TransferStatus {
 pub struct TransferProgress {
     pub status: TransferStatus,
     pub role: TransferRole,
+    pub connection_type: ConnectionType,
+    pub pairing_code: Option<String>,
+    pub code_expires_in: Option<String>,
     pub file_name: String,
     pub total_bytes: u64,
     pub transferred_bytes: u64,
@@ -38,6 +61,9 @@ impl Default for TransferProgress {
         Self {
             status: TransferStatus::Idle,
             role: TransferRole::Sender,
+            connection_type: ConnectionType::None,
+            pairing_code: None,
+            code_expires_in: None,
             file_name: String::new(),
             total_bytes: 0,
             transferred_bytes: 0,

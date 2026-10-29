@@ -20,7 +20,6 @@ impl TransferManager {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_progress(progress: SharedProgress) -> Self {
         Self {
             progress,
@@ -32,7 +31,6 @@ impl TransferManager {
         self.progress.clone()
     }
 
-    #[allow(dead_code)]
     pub fn cancel_signal(&self) -> Arc<AtomicBool> {
         self.cancel_signal.clone()
     }
@@ -43,6 +41,7 @@ impl TransferManager {
             p.status,
             TransferStatus::Preparing
                 | TransferStatus::WaitingForPeer
+                | TransferStatus::Connecting
                 | TransferStatus::Connected
                 | TransferStatus::Transferring
         )

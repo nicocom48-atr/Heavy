@@ -8,25 +8,25 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::net::TcpListener;
 
-use crate::discovery::spawn_beacon;
+use crate::connectivity::establish_sender_connection;
 use crate::integrity::compute_file_blake3;
-use crate::network::print_sender_connection_info;
 use crate::protocol::{
-    derive_session_cipher, encrypt_chunk, generate_auth_challenge, generate_keypair,
-    send_encrypted_chunk, send_end_of_stream, send_handshake_offer, verify_auth_proof,
-    HandshakeOffer, PROTOCOL_VERSION,
+    derive_session_cipher, encrypt_chunk, generate_keypair, send_encrypted_chunk,
+    send_end_of_stream, send_handshake_offer, verify_proof_constant_time, HandshakeOffer,
+    PROTOCOL_VERSION,
 };
+use crate::session::Session;
+use crate::signaling::SignalingClient;
 use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
 
 pub struct SenderConfig {
     pub file_path: PathBuf,
-    pub bind_addr: String,
-    pub port: u16,
+    pub session: Session,
+    pub preferred_port: u16,
     pub chunk_size: u32,
-    pub token: Option<String>,
     pub skip_prehash: bool,
+    pub signaling_server: Option<String>,
     pub shared_progress: Option<SharedProgress>,
     pub cancel_signal: Option<Arc<AtomicBool>>,
 }
@@ -72,343 +72,273 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         .to_string_lossy()
         .to_string();
 
+    let code_formatted = config.session.code().formatted();
+
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
         p.role = TransferRole::Sender;
         p.status = TransferStatus::Preparing;
         p.file_name = file_name.clone();
         p.total_bytes = file_size;
-        p.status_text = "Preparando archivo y calculando hash...".to_string();
+        p.pairing_code = Some(code_formatted.clone());
+        p.code_expires_in = Some(config.session.format_remaining());
+        p.status_text = "Calculando comprobación de integridad BLAKE3...".to_string();
     }
 
     println!(
         "{}",
-        "\n[1/3] Preparing file for encrypted P2P transfer..."
-            .cyan()
+        "\n================ [ HEAVYDROP P2P TRANSFER ] ================"
             .bold()
+            .cyan()
     );
-    println!("  File Name : {}", file_name.bold());
+    println!("  Archivo : {}", file_name.bold());
     println!(
-        "  File Size : {} ({:.2} GB)",
+        "  Tamaño  : {} ({:.2} GB)",
         indicatif::HumanBytes(file_size),
         file_size as f64 / (1024.0 * 1024.0 * 1024.0)
     );
+    println!("  Código  : {}", code_formatted.green().bold());
     println!(
-        "  Chunk Size: {}",
-        indicatif::HumanBytes(config.chunk_size as u64)
+        "  Estado  : Esperando que el receptor ingrese el código ({})",
+        config.session.format_remaining().yellow()
+    );
+    println!(
+        "{}",
+        "============================================================\n"
+            .bold()
+            .cyan()
     );
 
     // Calculate full file hash
     let file_hash = if config.skip_prehash {
-        println!(
-            "  {}",
-            "Skipping full pre-hash as requested. Chunks will be verified individually on arrival."
-                .yellow()
-        );
         "UNVERIFIED_PREHASH".to_string()
     } else {
-        println!("  Computing BLAKE3 integrity checksum...");
         compute_file_blake3(&config.file_path, config.shared_progress.is_none())
             .context("Failed to compute file BLAKE3 checksum")?
     };
-
-    println!("  BLAKE3 Hash: {}", file_hash.green());
-
-    // Bind TCP socket
-    let bind_target = format!("{}:{}", config.bind_addr, config.port);
-    let listener = match TcpListener::bind(&bind_target).await {
-        Ok(l) => l,
-        Err(e) => {
-            if let Some(ref sp) = config.shared_progress {
-                let mut p = sp.lock();
-                p.status = TransferStatus::Failed;
-                p.error = Some(format!("No se pudo abrir el puerto {}: {}", config.port, e));
-            }
-            return Err(e).with_context(|| format!("Failed to bind to {}", bind_target));
-        }
-    };
-
-    let local_port = listener.local_addr()?.port();
-    print_sender_connection_info(local_port, &config.token);
-
-    // Spawn local discovery beacon on LAN
-    spawn_beacon(file_name.clone(), file_size, local_port, cancel.clone());
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
         p.status = TransferStatus::WaitingForPeer;
         p.status_text = format!(
-            "Esperando conexión del receptor en puerto {}...",
-            local_port
+            "Esperando conexión del receptor con código {}...",
+            code_formatted
         );
     }
 
-    // Wait for receiver connection or cancellation
-    let (mut stream, peer_addr) = tokio::select! {
-        conn = listener.accept() => {
-            conn.context("Failed to accept connection from peer")?
-        }
-        _ = async {
-            while !cancel.load(Ordering::Relaxed) {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-        } => {
-            bail!("Transfer cancelled cooperatively by user while waiting for connection");
-        }
-    };
+    let signal_client = SignalingClient::new(config.signaling_server);
 
-    let _ = stream.set_nodelay(true);
+    // Establish direct or relay connection
+    let mut established = establish_sender_connection(
+        &config.session,
+        config.preferred_port,
+        &signal_client,
+        cancel.clone(),
+    )
+    .await?;
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
         p.status = TransferStatus::Connected;
-        p.peer_address = peer_addr.to_string();
-        p.status_text = format!("Receptor conectado desde {}", peer_addr);
+        p.connection_type = established.conn_type;
+        p.peer_address = established.peer_description.clone();
+        p.status_text = format!(
+            "Receptor conectado ({})! Iniciando autenticación mutua...",
+            established.conn_type.label()
+        );
     }
 
     println!(
-        "\n{} Peer connected from: {}",
-        "✓".green().bold(),
-        peer_addr.to_string().cyan().bold()
+        "✓ Receptor conectado ({})! Realizando autenticación criptográfica...",
+        established.conn_type.label().green()
     );
 
-    // Generate ephemeral X25519 keypair for Perfect Forward Secrecy transport encryption
+    // Generate ephemeral X25519 keypair
     let (sender_secret, sender_public) = generate_keypair()?;
 
-    // Cryptographic Challenge Generation (Zero secret token leakage)
-    let (auth_required, auth_challenge) = if config.token.is_some() {
-        (true, generate_auth_challenge()?)
-    } else {
-        (false, [0u8; 32])
-    };
+    // Compute mutual authentication proof
+    let sender_auth_proof = config
+        .session
+        .code()
+        .compute_sender_proof(config.session.salt(), &sender_public);
 
-    // Perform Handshake
-    println!(
-        "{}",
-        "[2/3] Performing encrypted protocol handshake with receiver...".cyan()
-    );
     let offer = HandshakeOffer {
         protocol_version: PROTOCOL_VERSION,
+        session_id: config.session.id().to_string(),
         sender_public_key: sender_public,
+        session_salt: *config.session.salt(),
         file_name: file_name.clone(),
         file_size,
         chunk_size: config.chunk_size,
-        file_hash: file_hash.clone(),
-        auth_required,
-        auth_challenge,
+        file_hash,
+        sender_auth_proof,
     };
 
-    send_handshake_offer(&mut stream, &offer).await?;
+    // Send Handshake Offer to receiver
+    send_handshake_offer(&mut established.stream, &offer).await?;
 
-    let response = crate::protocol::receive_handshake_response(&mut stream).await?;
+    // Receive Handshake Response from receiver
+    let response = crate::protocol::receive_handshake_response(&mut established.stream).await?;
 
-    // Server-Side Authentication Verification (Constant-Time)
-    if let Some(ref secret_token) = config.token {
-        let is_valid = match response.auth_proof {
-            Some(ref proof) => verify_auth_proof(secret_token, &auth_challenge, proof),
-            None => false,
-        };
+    // Verify Receiver Authentication Proof in constant time
+    let expected_receiver_proof = config
+        .session
+        .code()
+        .compute_receiver_proof(config.session.salt(), &response.receiver_public_key);
 
-        if !is_valid {
-            eprintln!(
-                "{} Peer authentication failed from {}: invalid or missing token.",
-                "SECURITY ERROR:".red().bold(),
-                peer_addr
-            );
-            if let Some(ref sp) = config.shared_progress {
-                let mut p = sp.lock();
-                p.status = TransferStatus::Failed;
-                p.error = Some(
-                    "Conexión rechazada: el receptor no proporcionó la clave correcta".to_string(),
-                );
-            }
-            bail!("Unauthorized connection: peer failed security token authentication.");
+    if !verify_proof_constant_time(&expected_receiver_proof, &response.receiver_auth_proof) {
+        if let Some(ref sp) = config.shared_progress {
+            let mut p = sp.lock();
+            p.status = TransferStatus::Failed;
+            p.error = Some("Autenticación fallida: código incorrecto del receptor".to_string());
         }
-        println!(
-            "{} Peer authentication verified cryptographically!",
-            "✓".green().bold()
-        );
+        bail!("Autenticación rechazada: el receptor no presentó la prueba válida del código");
     }
+
+    // Invalidate/consume code so it cannot be reused
+    let _ = config.session.consume();
 
     if !response.accepted {
         let msg = response
             .message
-            .unwrap_or_else(|| "Unknown rejection reason".to_string());
+            .unwrap_or_else(|| "El receptor rechazó la transferencia".to_string());
         if let Some(ref sp) = config.shared_progress {
             let mut p = sp.lock();
-            p.status = TransferStatus::Failed;
-            p.error = Some(format!("Receptor rechazó la transferencia: {}", msg));
+            p.status = TransferStatus::Completed;
+            p.status_text = msg.clone();
         }
-        bail!("Receiver rejected the file transfer: {}", msg.red());
+        println!("ℹ {}", msg.yellow());
+        return Ok(());
     }
 
-    // Derive symmetric ChaCha20-Poly1305 AEAD cipher
+    // Derive symmetric ChaCha20-Poly1305 session cipher
     let cipher = derive_session_cipher(
         &sender_secret,
         &response.receiver_public_key,
-        config.token.as_deref(),
-    );
-    println!(
-        "{} ChaCha20-Poly1305 AEAD Transport Encryption active!",
-        "✓".green().bold()
+        &config.session.code().derive_auth_key(),
+        config.session.salt(),
     );
 
-    let resume_offset = response.resume_offset;
+    let mut resume_offset = response.resume_offset;
     if resume_offset > file_size {
-        bail!(
-            "Security violation: peer requested resume offset ({}) beyond file size ({})",
-            resume_offset,
-            file_size
-        );
+        resume_offset = 0;
     }
-    if resume_offset % (config.chunk_size as u64) != 0 && resume_offset != file_size {
-        bail!(
-            "Protocol violation: resume offset {} is not aligned to chunk size {}",
-            resume_offset,
-            config.chunk_size
-        );
-    }
-
-    if resume_offset > 0 {
-        let percent = (resume_offset as f64 / file_size as f64) * 100.0;
-        println!(
-            "  {} {}",
-            "🔄 Resuming transfer from byte:".yellow().bold(),
-            format!(
-                "{} / {:.2}% already present on receiver",
-                indicatif::HumanBytes(resume_offset),
-                percent
-            )
-            .yellow()
-        );
-    } else {
-        println!("  Handshake accepted. Starting full transfer.");
-    }
-
-    // Open file for async streaming
-    let mut file = File::open(&config.file_path).await?;
-    if resume_offset > 0 {
-        file.seek(SeekFrom::Start(resume_offset)).await?;
-    }
-
-    println!(
-        "\n{}",
-        "[3/3] Streaming encrypted file chunks...".cyan().bold()
-    );
-
-    let pb = if config.shared_progress.is_none() {
-        let p = ProgressBar::new(file_size);
-        p.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})")
-                .expect("Invalid progress template")
-                .progress_chars("#>-"),
-        );
-        p.set_position(resume_offset);
-        Some(p)
-    } else {
-        None
-    };
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
         p.status = TransferStatus::Transferring;
-        p.transferred_bytes = resume_offset;
         p.resume_offset = resume_offset;
-        p.status_text = "Transfiriendo datos cifrados...".to_string();
+        p.transferred_bytes = resume_offset;
+        p.status_text = "Transfiriendo archivo cifrado...".to_string();
     }
 
-    let mut buffer = vec![0u8; config.chunk_size as usize];
-    let mut current_offset = resume_offset;
+    let mut file = File::open(&config.file_path).await?;
+    if resume_offset > 0 {
+        file.seek(SeekFrom::Start(resume_offset)).await?;
+        println!(
+            "🔄 Reanudando transferencia desde byte {}",
+            indicatif::HumanBytes(resume_offset)
+        );
+    }
 
-    let mut last_instant = Instant::now();
-    let mut last_bytes = current_offset;
+    let remaining_bytes = file_size.saturating_sub(resume_offset);
+    let pb = if config.shared_progress.is_none() {
+        let bar = ProgressBar::new(file_size);
+        bar.set_position(resume_offset);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        Some(bar)
+    } else {
+        None
+    };
+
+    let mut chunk_buf = vec![0u8; config.chunk_size as usize];
+    let mut current_offset = resume_offset;
+    let mut chunk_index = current_offset / (config.chunk_size as u64);
+    let start_time = Instant::now();
+    let mut last_speed_update = Instant::now();
+    let mut bytes_since_last_update = 0u64;
 
     while current_offset < file_size {
-        // Cooperative cancellation check
         if cancel.load(Ordering::Relaxed) {
-            if let Some(ref sp) = config.shared_progress {
-                let mut p = sp.lock();
-                p.status = TransferStatus::Cancelled;
-                p.status_text = "Transferencia cancelada por el usuario.".to_string();
-            }
-            bail!("Transfer cancelled cooperatively by user");
+            bail!("Transferencia cancelada por el usuario");
         }
 
-        let to_read = std::cmp::min(
-            config.chunk_size as usize,
-            (file_size - current_offset) as usize,
-        );
-        let n = file.read_exact(&mut buffer[..to_read]).await?;
+        let to_read = std::cmp::min(config.chunk_size as u64, file_size - current_offset) as usize;
+        file.read_exact(&mut chunk_buf[..to_read]).await?;
 
-        if n == 0 {
-            break;
+        let ciphertext = encrypt_chunk(
+            &cipher,
+            config.session.salt(),
+            chunk_index,
+            &chunk_buf[..to_read],
+        )?;
+
+        send_encrypted_chunk(
+            &mut established.stream,
+            current_offset,
+            &chunk_buf[..to_read],
+            &ciphertext,
+        )
+        .await?;
+
+        current_offset += to_read as u64;
+        chunk_index += 1;
+        bytes_since_last_update += to_read as u64;
+
+        if let Some(ref bar) = pb {
+            bar.inc(to_read as u64);
         }
 
-        let chunk_index = current_offset / (config.chunk_size as u64);
-        let ciphertext = encrypt_chunk(&cipher, chunk_index, &buffer[..n])?;
+        let now = Instant::now();
+        if now.duration_since(last_speed_update) >= std::time::Duration::from_millis(250) {
+            let elapsed_sec = now.duration_since(last_speed_update).as_secs_f64();
+            let bps = if elapsed_sec > 0.0 {
+                bytes_since_last_update as f64 / elapsed_sec
+            } else {
+                0.0
+            };
 
-        send_encrypted_chunk(&mut stream, current_offset, &buffer[..n], &ciphertext).await?;
-
-        current_offset += n as u64;
-
-        if let Some(ref p) = pb {
-            p.inc(n as u64);
-        }
-
-        let elapsed = last_instant.elapsed();
-        if elapsed.as_millis() >= 100 {
-            let bytes_diff = current_offset - last_bytes;
-            let speed = (bytes_diff as f64) / elapsed.as_secs_f64();
             if let Some(ref sp) = config.shared_progress {
                 let mut p = sp.lock();
                 p.transferred_bytes = current_offset;
-                p.bytes_per_sec = speed;
+                p.bytes_per_sec = bps;
             }
-            last_instant = Instant::now();
-            last_bytes = current_offset;
+
+            last_speed_update = now;
+            bytes_since_last_update = 0;
         }
     }
 
-    // Send end of stream indicator
-    send_end_of_stream(&mut stream).await?;
+    send_end_of_stream(&mut established.stream).await?;
 
-    // Wait for receiver ACK
-    let mut ack = [0u8; 1];
-    let ack_result = stream.read_exact(&mut ack).await;
-    match ack_result {
-        Ok(_) if ack[0] == 1 => {
-            if let Some(ref p) = pb {
-                p.finish_with_message(
-                    "Transfer completed & verified by receiver!"
-                        .green()
-                        .bold()
-                        .to_string(),
-                );
-            }
-            if let Some(ref sp) = config.shared_progress {
-                let mut p = sp.lock();
-                p.status = TransferStatus::Completed;
-                p.transferred_bytes = file_size;
-                p.bytes_per_sec = 0.0;
-                p.status_text = "¡Transferencia completada y verificada exitosamente!".to_string();
-            }
-            println!(
-                "\n{} Transfer was 100% successful and verified!",
-                "SUCCESS:".green().bold()
-            );
-        }
-        _ => {
-            if let Some(ref p) = pb {
-                p.abandon();
-            }
-            if let Some(ref sp) = config.shared_progress {
-                let mut p = sp.lock();
-                p.status = TransferStatus::Failed;
-                p.error = Some("El receptor reportó fallo de verificación o abortó".to_string());
-            }
-            bail!("Transfer ended, but receiver failed to verify data integrity or aborted!");
-        }
+    if let Some(ref bar) = pb {
+        bar.finish_with_message("Transferencia completada con éxito!");
+    }
+
+    let elapsed = start_time.elapsed().as_secs_f64();
+    let avg_speed_mb = if elapsed > 0.0 {
+        (remaining_bytes as f64 / (1024.0 * 1024.0)) / elapsed
+    } else {
+        0.0
+    };
+
+    println!(
+        "\n{} Archivo enviado exitosamente ({:.2} MB/s)",
+        "SUCCESS:".green().bold(),
+        avg_speed_mb
+    );
+
+    if let Some(ref sp) = config.shared_progress {
+        let mut p = sp.lock();
+        p.status = TransferStatus::Completed;
+        p.transferred_bytes = file_size;
+        p.status_text = format!("¡Transferencia completada a {:.2} MB/s!", avg_speed_mb);
+        p.bytes_per_sec = 0.0;
     }
 
     Ok(())
