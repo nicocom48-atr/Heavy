@@ -10,7 +10,8 @@ use tokio::net::TcpStream;
 
 use crate::integrity::compute_file_blake3;
 use crate::protocol::{
-    receive_chunk_header, receive_handshake_offer, send_handshake_response, HandshakeResponse,
+    compute_auth_proof, receive_chunk_header, receive_handshake_offer, sanitize_file_name,
+    send_handshake_response, HandshakeResponse, CHUNK_TIMEOUT,
 };
 use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
 
@@ -63,8 +64,11 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
     // Receive Handshake Offer
     let offer = receive_handshake_offer(&mut stream).await?;
 
+    // Strict Path Traversal Sanitization
+    let safe_file_name = sanitize_file_name(&offer.file_name)?;
+
     println!("\n{}", "[2/3] Validating transfer details...".cyan().bold());
-    println!("  File Name : {}", offer.file_name.bold());
+    println!("  File Name : {}", safe_file_name.bold());
     println!(
         "  File Size : {} ({:.2} GB)",
         indicatif::HumanBytes(offer.file_size),
@@ -75,30 +79,42 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
-        p.file_name = offer.file_name.clone();
+        p.file_name = safe_file_name.clone();
         p.total_bytes = offer.file_size;
     }
 
-    // Validate security token if present
-    if let Some(ref required_token) = offer.auth_token {
-        if config.token.as_ref() != Some(required_token) {
-            let resp = HandshakeResponse {
-                accepted: false,
-                resume_offset: 0,
-                message: Some("Authentication failed: invalid or missing security token.".to_string()),
-            };
-            let _ = send_handshake_response(&mut stream, &resp).await;
-            if let Some(ref sp) = config.shared_progress {
-                let mut p = sp.lock();
-                p.status = TransferStatus::Failed;
-                p.error = Some("Autenticación fallida: contraseña o token incorrecto".to_string());
+    // Compute Cryptographic Authentication Proof if required (Zero password disclosure)
+    let auth_proof = if offer.auth_required {
+        match config.token {
+            Some(ref secret_token) => {
+                Some(compute_auth_proof(secret_token, &offer.auth_challenge))
             }
-            bail!("Authentication failed: Server requires a security token (--token <SECRET>)");
+            None => {
+                let resp = HandshakeResponse {
+                    accepted: false,
+                    resume_offset: 0,
+                    auth_proof: None,
+                    message: Some("Authentication failed: server requires security token (--token)".to_string()),
+                };
+                let _ = send_handshake_response(&mut stream, &resp).await;
+                if let Some(ref sp) = config.shared_progress {
+                    let mut p = sp.lock();
+                    p.status = TransferStatus::Failed;
+                    p.error = Some("El emisor requiere contraseña/token (--token)".to_string());
+                }
+                bail!("Server requires authentication: please specify a security token (--token <PASSWORD>)");
+            }
         }
+    } else {
+        None
+    };
+
+    // Determine target output path safely within output_dir
+    let destination_path = config.output_dir.join(&safe_file_name);
+    if destination_path.parent() != Some(&config.output_dir) {
+        bail!("Security violation: destination path escapes output directory");
     }
 
-    // Determine target output path
-    let destination_path = config.output_dir.join(&offer.file_name);
     let mut resume_offset = 0u64;
 
     if destination_path.exists() && !config.force {
@@ -114,6 +130,7 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
                     let resp = HandshakeResponse {
                         accepted: false,
                         resume_offset: existing_len,
+                        auth_proof,
                         message: Some("File already exists and matches hash perfectly.".to_string()),
                     };
                     send_handshake_response(&mut stream, &resp).await?;
@@ -141,10 +158,11 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
         }
     }
 
-    // Accept handshake and provide resume offset
+    // Accept handshake and provide resume offset along with auth proof
     let handshake_resp = HandshakeResponse {
         accepted: true,
         resume_offset,
+        auth_proof,
         message: None,
     };
     send_handshake_response(&mut stream, &handshake_resp).await?;
@@ -199,14 +217,39 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
             break;
         }
 
-        let chunk_len = header.length as usize;
-        if chunk_len > chunk_buffer.len() {
-            bail!("Chunk length exceeds buffer size ({} > {})", chunk_len, chunk_buffer.len());
+        // Security check: Offset must strictly match current expected offset
+        if header.offset != current_offset {
+            bail!(
+                "Protocol violation: expected chunk at offset {}, received offset {}",
+                current_offset,
+                header.offset
+            );
         }
 
-        // Read exact chunk payload
-        stream.read_exact(&mut chunk_buffer[..chunk_len]).await
-            .context("Connection dropped while reading chunk data")?;
+        let chunk_len = header.length as usize;
+        // Security check: Chunk length must not exceed advertised chunk buffer
+        if chunk_len == 0 || chunk_len > chunk_buffer.len() {
+            bail!("Invalid chunk length received: {} bytes (max allowed: {})", chunk_len, chunk_buffer.len());
+        }
+
+        // Security check: Total received bytes must not exceed advertised file size
+        if current_offset.saturating_add(header.length as u64) > offer.file_size {
+            bail!(
+                "Security violation: received data exceeds advertised file size ({} + {} > {})",
+                current_offset,
+                header.length,
+                offer.file_size
+            );
+        }
+
+        // Read exact chunk payload with network timeout
+        tokio::time::timeout(
+            CHUNK_TIMEOUT,
+            stream.read_exact(&mut chunk_buffer[..chunk_len])
+        )
+        .await
+        .context("Timed out reading chunk data from peer")?
+        .context("Connection dropped while reading chunk data")?;
 
         // Cryptographically verify chunk BLAKE3 checksum immediately
         let computed_chunk_hash = blake3::hash(&chunk_buffer[..chunk_len]);

@@ -10,7 +10,10 @@ use tokio::net::TcpListener;
 
 use crate::integrity::compute_file_blake3;
 use crate::network::print_sender_connection_info;
-use crate::protocol::{send_chunk, send_end_of_stream, send_handshake_offer};
+use crate::protocol::{
+    generate_auth_challenge, send_chunk, send_end_of_stream, send_handshake_offer,
+    verify_auth_proof, HandshakeOffer,
+};
 use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
 
 pub struct SenderConfig {
@@ -128,19 +131,50 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         peer_addr.to_string().cyan().bold()
     );
 
+    // Cryptographic Challenge Generation (Zero secret token leakage)
+    let (auth_required, auth_challenge) = if config.token.is_some() {
+        (true, generate_auth_challenge()?)
+    } else {
+        (false, [0u8; 32])
+    };
+
     // Perform Handshake
     println!("{}", "[2/3] Performing protocol handshake with receiver...".cyan());
-    let offer = crate::protocol::HandshakeOffer {
+    let offer = HandshakeOffer {
         file_name: file_name.clone(),
         file_size,
         chunk_size: config.chunk_size,
         file_hash: file_hash.clone(),
-        auth_token: config.token.clone(),
+        auth_required,
+        auth_challenge,
     };
 
     send_handshake_offer(&mut stream, &offer).await?;
 
     let response = crate::protocol::receive_handshake_response(&mut stream).await?;
+
+    // Server-Side Authentication Verification (Constant-Time)
+    if let Some(ref secret_token) = config.token {
+        let is_valid = match response.auth_proof {
+            Some(ref proof) => verify_auth_proof(secret_token, &auth_challenge, proof),
+            None => false,
+        };
+
+        if !is_valid {
+            eprintln!(
+                "{} Peer authentication failed from {}: invalid or missing token.",
+                "SECURITY ERROR:".red().bold(),
+                peer_addr
+            );
+            if let Some(ref sp) = config.shared_progress {
+                let mut p = sp.lock();
+                p.status = TransferStatus::Failed;
+                p.error = Some("Conexión rechazada: el receptor no proporcionó la clave correcta".to_string());
+            }
+            bail!("Unauthorized connection: peer failed security token authentication.");
+        }
+        println!("{} Peer authentication verified cryptographically!", "✓".green().bold());
+    }
 
     if !response.accepted {
         let msg = response.message.unwrap_or_else(|| "Unknown rejection reason".to_string());
@@ -153,6 +187,23 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     }
 
     let resume_offset = response.resume_offset;
+    // Security check: validate resume offset bounds
+    if resume_offset > file_size {
+        bail!(
+            "Security violation: peer requested resume offset ({}) beyond file size ({})",
+            resume_offset,
+            file_size
+        );
+    }
+    // Security check: validate resume offset alignment
+    if resume_offset % (config.chunk_size as u64) != 0 && resume_offset != file_size {
+        bail!(
+            "Protocol violation: resume offset {} is not aligned to chunk size {}",
+            resume_offset,
+            config.chunk_size
+        );
+    }
+
     if resume_offset > 0 {
         let percent = (resume_offset as f64 / file_size as f64) * 100.0;
         println!(
