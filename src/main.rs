@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod cli;
 mod gui;
 
@@ -9,6 +11,17 @@ use heavydrop::sender;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+#[cfg(target_os = "windows")]
+fn attach_console() {
+    unsafe {
+        extern "system" {
+            fn AttachConsole(dwProcessId: u32) -> i32;
+        }
+        const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() -> ExitCode {
     let args = cli::Cli::parse();
 
@@ -16,6 +29,9 @@ fn main() -> ExitCode {
     match args.command {
         None | Some(cli::Commands::Gui) => launch_gui(),
         Some(cmd) => {
+            #[cfg(target_os = "windows")]
+            attach_console();
+
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -33,6 +49,9 @@ fn launch_gui() -> ExitCode {
             .build()
             .expect("Failed to start async runtime for GUI"),
     );
+
+    // Keep the Tokio runtime context entered on the main thread so any tokio calls work
+    let _guard = rt.enter();
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

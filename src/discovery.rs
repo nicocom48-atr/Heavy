@@ -85,7 +85,7 @@ impl DiscoveryService {
         let peers_clone = peers.clone();
         let cancel_clone = cancel_signal.clone();
 
-        tokio::spawn(async move {
+        let task = async move {
             let socket = match UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await {
                 Ok(s) => s,
                 Err(_) => return,
@@ -120,7 +120,11 @@ impl DiscoveryService {
                     }
                 }
             }
-        });
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(task);
+        }
 
         Self {
             peers,
