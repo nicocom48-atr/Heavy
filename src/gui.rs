@@ -442,10 +442,10 @@ impl eframe::App for HeavyDropApp {
                         if is_wide {
                             let col_width = (total_width - 24.0) / 2.0;
 
-                            ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                                 // Left Column: Enviar
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(col_width, 10.0),
+                                    egui::vec2(col_width, 0.0),
                                     egui::Layout::top_down(egui::Align::LEFT),
                                     |ui| {
                                         self.render_send_panel(ui, is_busy);
@@ -456,7 +456,7 @@ impl eframe::App for HeavyDropApp {
 
                                 // Right Column: Recibir
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(col_width, 10.0),
+                                    egui::vec2(col_width, 0.0),
                                     egui::Layout::top_down(egui::Align::LEFT),
                                     |ui| {
                                         self.render_receive_panel(ui, is_busy);
