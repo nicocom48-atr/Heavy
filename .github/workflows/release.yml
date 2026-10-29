@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Nombre del Tag para la Release (ej. v0.1.0)'
+        description: 'Nombre del Tag para la Release (ej. v0.1.1)'
         required: true
-        default: 'v0.1.0'
+        default: 'v0.1.1'
       draft:
         description: 'Crear como borrador (Draft)'
         type: boolean

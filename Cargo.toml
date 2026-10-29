@@ -1,6 +1,6 @@
 [package]
 name = "heavydrop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["heavydrop contributors"]
 description = "High-performance P2P file transfer tool optimized for huge files (50GB+) with resume, AEAD encryption, and BLAKE3 verification"
