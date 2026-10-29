@@ -52,17 +52,43 @@ pub fn spawn_blind_beacon(
             Err(_) => return,
         };
 
-        let broadcast_addr: SocketAddr = match format!("255.255.255.255:{}", DISCOVERY_PORT).parse()
-        {
-            Ok(a) => a,
-            Err(_) => return,
-        };
+        let mut target_addrs: Vec<SocketAddr> = Vec::new();
+        // 1. Loopback for same-machine discovery
+        if let Ok(addr) = format!("127.0.0.1:{}", DISCOVERY_PORT).parse() {
+            target_addrs.push(addr);
+        }
+        // 2. Global broadcast
+        if let Ok(addr) = format!("255.255.255.255:{}", DISCOVERY_PORT).parse() {
+            target_addrs.push(addr);
+        }
+        // 3. Subnet broadcast for all local network adapters (e.g. Wi-Fi / Ethernet)
+        for (_iface, ip) in crate::network::get_available_local_ips() {
+            if let std::net::IpAddr::V4(v4) = ip {
+                let oct = v4.octets();
+                let bcast = std::net::Ipv4Addr::new(oct[0], oct[1], oct[2], 255);
+                target_addrs.push(SocketAddr::new(std::net::IpAddr::V4(bcast), DISCOVERY_PORT));
+            }
+        }
 
         while !cancel_signal.load(Ordering::Relaxed) {
-            let _ = socket.send_to(&json_bytes, broadcast_addr).await;
+            for &dest in &target_addrs {
+                let _ = socket.send_to(&json_bytes, dest).await;
+            }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     });
+}
+
+fn bind_reuse_udp(port: u16) -> Result<UdpSocket, Box<dyn std::error::Error + Send + Sync>> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    let _ = sock.set_reuse_address(true);
+    let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    sock.bind(&addr.into())?;
+    sock.set_nonblocking(true)?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    let tokio_sock = UdpSocket::from_std(std_sock)?;
+    Ok(tokio_sock)
 }
 
 /// Listens for LAN beacons and resolves pairing codes locally in milliseconds
@@ -80,9 +106,12 @@ impl DiscoveryService {
         let cancel_clone = cancel_signal.clone();
 
         let task = async move {
-            let socket = match UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await {
+            let socket = match bind_reuse_udp(DISCOVERY_PORT) {
                 Ok(s) => s,
-                Err(_) => return,
+                Err(_) => match UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                },
             };
 
             let mut buf = [0u8; 1024];

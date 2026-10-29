@@ -25,14 +25,15 @@ pub struct HeavyDropApp {
     send_file_path: Option<PathBuf>,
     send_session: Option<Session>,
     send_error: Option<String>,
+    send_manager: TransferManager,
 
     // Receive state
     recv_code_input: String,
     recv_output_dir: PathBuf,
     recv_error: Option<String>,
+    recv_manager: TransferManager,
 
     // Services
-    manager: TransferManager,
     discovery: Arc<DiscoveryService>,
     tokio_rt: Arc<Runtime>,
 
@@ -46,7 +47,8 @@ impl HeavyDropApp {
         Self::apply_custom_theme(&cc.egui_ctx);
 
         let default_output_dir = dirs_next_output_dir();
-        let manager = TransferManager::new();
+        let send_manager = TransferManager::new();
+        let recv_manager = TransferManager::new();
         let discovery = Arc::new(DiscoveryService::new());
 
         Self {
@@ -54,12 +56,13 @@ impl HeavyDropApp {
             send_file_path: None,
             send_session: None,
             send_error: None,
+            send_manager,
 
             recv_code_input: String::new(),
             recv_output_dir: default_output_dir,
             recv_error: None,
+            recv_manager,
 
-            manager,
             discovery,
             tokio_rt: rt,
 
@@ -110,9 +113,13 @@ impl HeavyDropApp {
         self.copied_toast_time = Some(Instant::now());
     }
 
-    fn cancel_current_transfer(&mut self) {
-        self.manager.cancel();
+    fn cancel_send_transfer(&mut self) {
+        self.send_manager.cancel();
         self.send_session = None;
+    }
+
+    fn cancel_recv_transfer(&mut self) {
+        self.recv_manager.cancel();
     }
 
     fn start_send_task(&mut self) {
@@ -146,7 +153,7 @@ impl HeavyDropApp {
             cancel_signal: None,
         };
 
-        let mgr = self.manager.clone();
+        let mgr = self.send_manager.clone();
         self.tokio_rt.spawn(async move {
             let _ = mgr.run_send(config).await;
         });
@@ -174,7 +181,7 @@ impl HeavyDropApp {
             discovery: Some(self.discovery.clone()),
         };
 
-        let mgr = self.manager.clone();
+        let mgr = self.recv_manager.clone();
         self.tokio_rt.spawn(async move {
             let _ = mgr.run_recv(config).await;
         });
@@ -483,8 +490,9 @@ fn draw_dashed_border(
 
 impl eframe::App for HeavyDropApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let is_busy = self.manager.is_busy();
-        if is_busy || self.send_session.is_some() {
+        let is_send_busy = self.send_manager.is_busy();
+        let is_recv_busy = self.recv_manager.is_busy();
+        if is_send_busy || is_recv_busy || self.send_session.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -556,7 +564,7 @@ impl eframe::App for HeavyDropApp {
                                                 egui::vec2(col_width, 0.0),
                                                 egui::Layout::top_down(egui::Align::LEFT),
                                                 |ui| {
-                                                    self.render_send_panel(ui, is_busy);
+                                                    self.render_send_panel(ui, is_send_busy);
                                                 },
                                             );
 
@@ -567,7 +575,7 @@ impl eframe::App for HeavyDropApp {
                                                 egui::vec2(col_width, 0.0),
                                                 egui::Layout::top_down(egui::Align::LEFT),
                                                 |ui| {
-                                                    self.render_receive_panel(ui, is_busy);
+                                                    self.render_receive_panel(ui, is_recv_busy);
                                                 },
                                             );
                                         },
@@ -577,13 +585,13 @@ impl eframe::App for HeavyDropApp {
                                     ui.horizontal(|ui| {
                                         let send_active = self.active_tab == ActiveTab::Send;
                                         if ui.selectable_label(send_active, "Enviar").clicked()
-                                            && !is_busy
+                                            && !is_send_busy
                                         {
                                             self.active_tab = ActiveTab::Send;
                                         }
                                         let recv_active = self.active_tab == ActiveTab::Receive;
                                         if ui.selectable_label(recv_active, "Recibir").clicked()
-                                            && !is_busy
+                                            && !is_recv_busy
                                         {
                                             self.active_tab = ActiveTab::Receive;
                                         }
@@ -592,9 +600,9 @@ impl eframe::App for HeavyDropApp {
                                     ui.add_space(8.0);
 
                                     match self.active_tab {
-                                        ActiveTab::Send => self.render_send_panel(ui, is_busy),
+                                        ActiveTab::Send => self.render_send_panel(ui, is_send_busy),
                                         ActiveTab::Receive => {
-                                            self.render_receive_panel(ui, is_busy)
+                                            self.render_receive_panel(ui, is_recv_busy)
                                         }
                                     }
                                 }
@@ -693,9 +701,9 @@ impl HeavyDropApp {
         }
     }
 
-    fn render_send_panel(&mut self, ui: &mut egui::Ui, is_busy: bool) {
+    fn render_send_panel(&mut self, ui: &mut egui::Ui, is_send_busy: bool) {
         let session_opt = self.send_session.clone();
-        let progress = self.manager.progress().lock().clone();
+        let progress = self.send_manager.progress().lock().clone();
         let is_sending_active =
             progress.status != TransferStatus::Idle && progress.role == TransferRole::Sender;
 
@@ -781,7 +789,7 @@ impl HeavyDropApp {
                         .color(egui::Color32::from_rgb(148, 163, 184)),
                     );
 
-                    if !is_busy && session_opt.is_none() {
+                    if !is_send_busy && session_opt.is_none() {
                         ui.add_space(4.0);
                         let change_btn = ui.add(
                             egui::Button::new(
@@ -949,7 +957,7 @@ impl HeavyDropApp {
                         .color(egui::Color32::from_rgb(148, 163, 184)),
                 );
 
-                if !is_busy {
+                if !is_send_busy {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button(
@@ -959,7 +967,7 @@ impl HeavyDropApp {
                             )
                             .clicked()
                         {
-                            self.cancel_current_transfer();
+                            self.cancel_send_transfer();
                         }
                     });
                 }
@@ -1021,7 +1029,7 @@ impl HeavyDropApp {
         // Live transfer monitor in Send panel when active
         if is_sending_active {
             ui.add_space(14.0);
-            self.render_transfer_dashboard(ui, &progress);
+            self.render_transfer_dashboard(ui, &progress, true);
         }
 
         if let Some(ref err) = self.send_error {
@@ -1034,8 +1042,8 @@ impl HeavyDropApp {
         }
     }
 
-    fn render_receive_panel(&mut self, ui: &mut egui::Ui, is_busy: bool) {
-        let progress = self.manager.progress().lock().clone();
+    fn render_receive_panel(&mut self, ui: &mut egui::Ui, is_recv_busy: bool) {
+        let progress = self.recv_manager.progress().lock().clone();
         let is_recv_active =
             progress.status != TransferStatus::Idle && progress.role == TransferRole::Receiver;
 
@@ -1060,7 +1068,7 @@ impl HeavyDropApp {
         );
         ui.add_space(4.0);
 
-        // 2. Rounded Pill Input Field
+        // 2. Rounded Pill Input Field with auto-uppercase
         egui::Frame::group(ui.style())
             .fill(egui::Color32::from_rgb(20, 20, 26))
             .stroke(egui::Stroke::new(
@@ -1086,8 +1094,8 @@ impl HeavyDropApp {
 
         ui.add_space(10.0);
 
-        // 3. Button "Usar código" with electric blue accent
-        if !is_busy {
+        // 3. Button "Usar código" (Only shows Cancelar conexión when the receiver itself is busy!)
+        if !is_recv_busy {
             let has_code = PairingCode::parse(&self.recv_code_input).is_ok();
             let btn_fill = if has_code {
                 egui::Color32::from_rgb(14, 165, 233) // Electric cyan/blue
@@ -1140,7 +1148,7 @@ impl HeavyDropApp {
                 .rounding(21.0),
             );
             if cancel_btn.clicked() {
-                self.cancel_current_transfer();
+                self.cancel_recv_transfer();
             }
         }
 
@@ -1148,7 +1156,7 @@ impl HeavyDropApp {
 
         // 4. State: Either Active Transfer Dashboard OR Clean Empty State
         if is_recv_active {
-            self.render_transfer_dashboard(ui, &progress);
+            self.render_transfer_dashboard(ui, &progress, false);
         } else {
             // Modern Clean Empty State Box
             egui::Frame::group(ui.style())
@@ -1173,7 +1181,7 @@ impl HeavyDropApp {
                             );
                             ui.label(
                                 egui::RichText::new(
-                                    "Se muestra la descarga tras conectar el código",
+                                    "Ingresá el código del emisor arriba para iniciar la descarga",
                                 )
                                 .size(11.0)
                                 .color(egui::Color32::from_rgb(113, 113, 122)),
@@ -1229,7 +1237,7 @@ impl HeavyDropApp {
                             .color(egui::Color32::from_rgb(228, 228, 231)),
                     );
 
-                    if !is_busy {
+                    if !is_recv_busy {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let change_btn = ui.add(
                                 egui::Button::new(
@@ -1261,7 +1269,12 @@ impl HeavyDropApp {
     }
 
     // Modern Integrated Transfer Progress Dashboard
-    fn render_transfer_dashboard(&mut self, ui: &mut egui::Ui, progress: &TransferProgress) {
+    fn render_transfer_dashboard(
+        &mut self,
+        ui: &mut egui::Ui,
+        progress: &TransferProgress,
+        is_sender: bool,
+    ) {
         egui::Frame::group(ui.style())
             .fill(egui::Color32::from_rgb(18, 20, 28))
             .stroke(egui::Stroke::new(
@@ -1386,7 +1399,13 @@ impl HeavyDropApp {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if self.manager.is_busy() {
+                    let is_busy = if is_sender {
+                        self.send_manager.is_busy()
+                    } else {
+                        self.recv_manager.is_busy()
+                    };
+
+                    if is_busy {
                         if ui
                             .button(
                                 egui::RichText::new("🛑 Cancelar transferencia")
@@ -1395,11 +1414,19 @@ impl HeavyDropApp {
                             )
                             .clicked()
                         {
-                            self.cancel_current_transfer();
+                            if is_sender {
+                                self.cancel_send_transfer();
+                            } else {
+                                self.cancel_recv_transfer();
+                            }
                         }
                     } else if ui.button("Listo / Cerrar").clicked() {
-                        self.manager.reset_cancel();
-                        self.send_session = None;
+                        if is_sender {
+                            self.send_manager.reset_cancel();
+                            self.send_session = None;
+                        } else {
+                            self.recv_manager.reset_cancel();
+                        }
                     }
                 });
             });
