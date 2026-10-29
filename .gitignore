@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.dat
+*.iso
+descargas/
+Cargo.lock
