@@ -3,7 +3,7 @@ name = "heavydrop"
 version = "0.1.0"
 edition = "2021"
 authors = ["heavydrop contributors"]
-description = "High-performance P2P file transfer tool optimized for huge files (50GB+) with resume and BLAKE3 verification"
+description = "High-performance P2P file transfer tool optimized for huge files (50GB+) with resume, AEAD encryption, and BLAKE3 verification"
 
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }
@@ -13,12 +13,12 @@ indicatif = { version = "0.17", features = ["tokio"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-thiserror = "1.0"
 local-ip-address = "0.6"
 colored = "2.1"
-bytes = "1.7"
 parking_lot = "0.12"
 eframe = "0.29"
 rfd = "0.15"
 constant_time_eq = "0.4"
 getrandom = "0.2"
+chacha20poly1305 = "0.11"
+x25519-dalek = { version = "3.0", features = ["static_secrets"] }
