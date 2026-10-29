@@ -94,7 +94,7 @@ async fn handle_client(
                     RegisteredSession {
                         candidates: all_candidates,
                         created_at: Instant::now(),
-                        ttl: Duration::from_secs(15 * 60),
+                        ttl: crate::session::DEFAULT_SESSION_TTL,
                     },
                 );
             }

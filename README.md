@@ -14,7 +14,7 @@ Dos usuarios pueden conectarse y transferir archivos compartiendo **únicamente 
 1. Abre HeavyDrop.
 2. Selecciona o arrastra el archivo (hasta 1 TB+).
 3. Pulsa **"Crear transferencia"**.
-4. La aplicación genera un código único de 12 caracteres (ejemplo: `KD7M-9Q2P-W8RX`) con validez de 15 minutos.
+4. La aplicación genera un código único de 12 caracteres (ejemplo: `KD7M-9Q2P-W8RX`) con validez de 5 minutos.
 5. Comparte ese código con el receptor.
 
 ### 📥 Receptor
@@ -95,7 +95,7 @@ Salida:
 ================ [ HEAVYDROP P2P TRANSFER ] ================
   Archivo : archivo_50gb.iso (50.00 GB)
   Código  : KD7M-9Q2P-W8RX
-  Estado  : Esperando que el receptor ingrese el código (14:59)
+  Estado  : Esperando que el receptor ingrese el código (04:59)
 ============================================================
 ```
 

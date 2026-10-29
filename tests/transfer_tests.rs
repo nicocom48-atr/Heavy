@@ -55,7 +55,7 @@ fn test_session_expiration_and_single_use_consumption() {
     let session = Session::new().unwrap();
     assert!(!session.is_expired());
     assert!(!session.is_consumed());
-    assert!(session.remaining_time().as_secs() > 890);
+    assert!(session.remaining_time().as_secs() > 290);
 
     // Consume once succeeds
     assert!(session.consume().is_ok());

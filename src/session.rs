@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::pairing::PairingCode;
 
-pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(15 * 60); // 15 minutes
+pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(5 * 60); // 5 minutes
 
 #[derive(Clone)]
 pub struct Session {
@@ -80,7 +80,7 @@ impl Session {
         }
     }
 
-    /// Format remaining time as MM:SS (e.g. "14:59")
+    /// Format remaining time as MM:SS (e.g. "04:59")
     pub fn format_remaining(&self) -> String {
         let secs = self.remaining_time().as_secs();
         let mins = secs / 60;
@@ -110,7 +110,7 @@ mod tests {
         let session = Session::new().unwrap();
         assert!(!session.is_expired());
         assert!(!session.is_consumed());
-        assert!(session.remaining_time().as_secs() > 890);
+        assert!(session.remaining_time().as_secs() > 290);
 
         // One-time consumption test
         assert!(session.consume().is_ok());
