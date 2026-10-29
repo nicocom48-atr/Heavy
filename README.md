@@ -1,222 +1,108 @@
 # ⚡ HeavyDrop: Transferencia P2P de Archivos Masivos (50GB+) en Rust
 
-**HeavyDrop** es una herramienta en Rust diseñada específicamente para la transferencia punto a punto (P2P) de archivos extremadamente pesados (50 GB, 100 GB, 1 TB o más) de forma rápida, segura y resiliente.
+**HeavyDrop** es una herramienta en Rust diseñada específicamente para la transferencia punto a punto (P2P) de archivos de cualquier tamaño (50 GB, 100 GB, 1 TB o más) con máxima velocidad, cifrado de transporte AEAD de extremo a extremo, verificación estricta de integridad y reanudación inteligente.
 
-Cuenta con una **interfaz gráfica nativa de escritorio (GUI)** moderna e intuitiva, además de una interfaz de línea de comandos (CLI) para terminal y automatizaciones.
+Cuenta con una **interfaz gráfica nativa de escritorio (GUI)** moderna y minimalista, además de una interfaz de línea de comandos (CLI) completa para terminales y automatizaciones.
+
+> **Nota de Distribución Oficial:** Las versiones binarias oficiales precompiladas de HeavyDrop se distribuyen **exclusivamente para Windows x64**. El código base está escrito en Rust multiplataforma para facilitar su compilación local en otros entornos si se desea.
 
 ---
 
 ## 🖥️ Interfaz Gráfica Nativa (GUI)
 
-Al abrir el ejecutable haciendo doble clic en `heavydrop.exe` (o ejecutándolo sin argumentos), se abrirá la **ventana de escritorio**:
+Al abrir `heavydrop.exe` sin argumentos (o haciendo doble clic), se inicia la aplicación de escritorio simplificada:
 
-- 📁 **Selector de archivos nativo de Windows:** Elige el archivo de 50GB mediante la ventana del Explorador de archivos con un solo clic.
-- 📋 **Detección y copia de IPs:** Muestra las direcciones IP de tu máquina (Wi-Fi, Ethernet, Tailscale/VPN) con botones de copia rápida para compartir con el otro equipo.
-- 📊 **Progreso en tiempo real:** Barra animada con velocidad (MB/s), bytes transferidos, porcentaje y tiempo restante estimado (ETA).
-- 🔄 **Reanudación visible:** Notificación visual clara si detecta un fragmento previo y continúa la descarga sin repetir datos.
-- 🛑 **Botón de cancelación:** Permite pausar o cancelar la transferencia limpiamente en cualquier instante.
-
----
-
-## 🚀 Características Técnicas
-
-1. **Memoria RAM Mínima y Constante (< 20 MB):**
-   - Transmisión en streaming por bloques (*chunks*, por defecto de 4 MB).
-   - Nunca carga el archivo completo en memoria, permitiendo mover archivos de 50 GB o más sin riesgo de saturar la memoria RAM.
-
-2. **Reanudación Automática Inteligente (*Resume*):**
-   - Si la conexión se interrumpe a los 45 GB de 50 GB (por microcorte de red, apagado o Wi-Fi inestable), no pierdes los datos ya descargados.
-   - El receptor detecta los bytes locales válidos, solicita la posición de reanudación y el emisor se posiciona (*seek*) instantáneamente en ese byte para continuar.
-
-3. **Verificación de Integridad Criptográfica con BLAKE3:**
-   - **En tránsito:** Cada chunk de 4 MB se verifica con un hash BLAKE3 antes de guardarse en el disco de destino. Si un paquete se corrompe en la red, se detecta de inmediato.
-   - **Fin de transferencia:** Se comprueba el hash global del archivo contra el anunciado por el emisor.
-   - **Rendimiento:** BLAKE3 es hasta 10 veces más rápido que SHA-256 (procesa 3 a 5 GB/s en procesadores modernos gracias a SIMD y Rayon), lo que evita cuellos de botella en la CPU.
-
-4. **Monitoreo en Tiempo Real:**
-   - Barra de progreso detallada con velocidad de transferencia en tiempo real (MB/s), bytes transferidos, porcentaje y tiempo restante estimado (ETA).
-
-5. **Alineación y Cero Sobrecarga de Protocolo:**
-   - Encabezado binario ligero con *magic bytes* (`HVDROP01`), negociación JSON tipada y *TCP_NODELAY* activado para minimizar la latencia.
-
-6. **Seguridad Opcional con Token:**
-   - Posibilidad de proteger la transferencia con una clave secreta (`--token`), asegurando que solo el receptor autorizado pueda descargar el archivo.
+- 📤 **Pestaña Enviar:**
+  - **Arrastrar y soltar (Drag and Drop):** Arrastra cualquier archivo directamente a la ventana para prepararlo al instante.
+  - **Descubrimiento Local Automático:** Emite un beacon en la red local (LAN) para que otros equipos te detecten sin necesidad de copiar IPs manualmente.
+  - **Opciones Avanzadas Plegables:** Configura puerto TCP, tamaño de chunks (MB), token de acceso o prehash únicamente si lo necesitas.
+- 📥 **Pestaña Recibir:**
+  - **Detección de Equipos en Red:** Lista automática de emisores activos en tu red local con botón de conexión en 1 clic.
+  - **Conexión Manual:** Campo directo para ingresar la IP o dirección del emisor.
+- 📊 **Monitor Unificado de Transferencia:**
+  - Muestra dispositivo/peer, nombre de archivo, barra de progreso porcentual, velocidad en tiempo real (MB/s) y tiempo restante estimado (ETA).
+  - **Cancelación Cooperativa:** Botón de cancelación limpia que detiene la transferencia de inmediato sin dejar archivos inconsistentes.
 
 ---
 
-## 📁 Estructura del Código
+## 🔒 Arquitectura y Seguridad
 
-```text
-heavydrop/
-├── Cargo.toml            # Dependencias: tokio, blake3, indicatif, clap, serde, etc.
-├── README.md             # Documentación detallada
-└── src/
-    ├── main.rs           # Punto de entrada y gestión de errores
-    ├── cli.rs            # Definición de argumentos de línea de comandos con clap
-    ├── protocol.rs       # Definición de tramas, handshake, chunks binarios y magic bytes
-    ├── integrity.rs      # Hashing ultra-rápido multihilo con BLAKE3 y barra de progreso
-    ├── network.rs        # Detección de interfaces LAN (Wi-Fi, Ethernet, Tailscale) y formateo de IPs
-    ├── sender.rs         # Servidor emisor con soporte para seek/resume y streaming de chunks
-    └── receiver.rs       # Cliente receptor con verificación de hashes en tiempo real y persistencia
+1. **Cifrado de Transporte AEAD (ChaCha20-Poly1305 + X25519):**
+   - Cada sesión de transferencia negocia un secreto compartido efímero mediante un intercambio de claves **X25519** (Perfect Forward Secrecy).
+   - Todos los chunks y tramas de datos viajan cifrados y autenticados con **ChaCha20-Poly1305 AEAD**. Cualquier manipulación en tránsito es detectada y rechazada de inmediato.
+2. **Autenticación Criptográfica de Conocimiento Cero (Challenge-Response):**
+   - El token secreto nunca se envía en texto claro por la red.
+   - El receptor genera una prueba BLAKE3 basada en un desafío (*challenge*) del emisor y el token compartido; el emisor valida la prueba en tiempo constante (`constant_time_eq`) para prevenir ataques de temporización.
+3. **Reanudación Segura con Archivos `.part` y Metadatos:**
+   - Las transferencias incompletas se almacenan como `archivo.part` acompañadas de `archivo.part.meta`.
+   - Si la red se corta tras 40 GB de un archivo de 50 GB, el receptor verifica el último fragmento local guardado. Si coincide, reanuda exactamente desde ese punto. Si hubo corrupción en disco, descarta el tramo inválido automáticamente.
+   - Una vez alcanzado el 100% y validado el hash global, el archivo `.part` se renombra atómicamente a su nombre final.
+4. **Protección Estricta contra Path Traversal:**
+   - Sanitización rigurosa de nombres de archivo contra rutas relativas (`../`), separadores de directorio y nombres de dispositivos reservados de Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`).
+5. **Memoria RAM Constante (< 20 MB):**
+   - Streaming por bloques (*chunks* de 4 MB) de flujo acotado. Nunca se carga el archivo entero en memoria.
+6. **Descubrimiento Local sin la Nube:**
+   - Baliza UDP ligera en red local sin servidores centrales, telemetría ni intermediarios.
+
+---
+
+## 📦 Descargas Oficiales (Windows x64)
+
+Los binarios oficiales se publican automáticamente en la sección de **[Releases en GitHub](https://github.com/nicocom48-atr/Heavy/releases)**:
+
+- 🪟 **Windows x64:** `heavydrop-vX.Y.Z-windows-x64.zip` (incluye `heavydrop.exe` optimizado y su checksum `heavydrop-vX.Y.Z-windows-x64.zip.sha256`).
+
+Para verificar la integridad del archivo descargado en PowerShell:
+```powershell
+Get-FileHash -Algorithm SHA256 heavydrop-vX.Y.Z-windows-x64.zip
 ```
 
 ---
 
-## 🛠️ Requisitos Previos e Instalación
+## 📖 Uso por Línea de Comandos (CLI)
 
-Para compilar y ejecutar el proyecto necesitas tener instalado el compilador de **Rust**:
-
-### 1. Instalar Rust (si aún no lo tienes)
-
-- **Windows:** Descarga e instala `rustup-init.exe` desde [rustup.rs](https://rustup.rs/) o ejecútalo mediante PowerShell:
-  ```powershell
-  winget install Rustlang.Rustup
-  ```
-  *(Luego reinicia la terminal para que cargue la variable de entorno `cargo`).*
-
-- **Linux / macOS:**
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
-
-### 2. Compilar en modo Release (Máximo Rendimiento)
-
-Abre la terminal en la carpeta del proyecto `heavydrop`:
-
-```bash
-cargo build --release
-```
-
-El ejecutable optimizado estará disponible en:
-- **Windows:** `target/release/heavydrop.exe`
-- **Linux/macOS:** `target/release/heavydrop`
-
----
-
-## 📖 Guía de Uso
-
-### 1. Modo Envío (`send`)
-
-Para enviar un archivo pesado (ej. un ISO de 50 GB):
+### 1. Enviar un archivo
 
 ```bash
 heavydrop send "F:\backups\archivo_50gb.iso"
 ```
 
-El programa calculará el hash BLAKE3 y mostrará automáticamente las opciones de conexión para compartir con el otro equipo:
+Opciones principales:
+- `--token <PASSWORD>`: Exige autenticación criptográfica al receptor.
+- `--port <PORT>`: Especifica el puerto TCP (por defecto `7878`).
+- `--chunk-size-mb <MB>`: Tamaño de bloque en MB (por defecto `4`).
+- `--no-prehash`: Comienza la transferencia de inmediato sin esperar el hash previo de archivos gigantes.
 
-```text
-================ [ HEAVYDROP P2P TRANSFER ] ================
-Waiting for receiver peer to connect...
-Share one of the following commands with the receiver:
-
-  ▶ [Wi-Fi LAN] (wlan0): heavydrop recv 192.168.1.45:7878
-  ▶ [Tailscale / VPN] (tailscale0): heavydrop recv 100.85.20.12:7878
-============================================================
-```
-
-#### Opciones avanzadas de envío:
-
-- **Proteger con contraseña / token:**
-  ```bash
-  heavydrop send "archivo.iso" --token mi_clave_secreta_123
-  ```
-
-- **Saltar el pre-cálculo del hash para inicio instantáneo:**
-  *(Útil si el archivo está en un disco rígido mecánico y no quieres esperar antes de enviar; cada chunk de 4MB se seguirá verificando en vuelo)*:
-  ```bash
-  heavydrop send "archivo.iso" --no-prehash
-  ```
-
-- **Cambiar el tamaño de fragmento (*chunk size*):**
-  ```bash
-  heavydrop send "archivo.iso" --chunk-size-mb 8 --port 9000
-  ```
-
----
-
-### 2. Modo Recepción (`recv`)
-
-En el equipo que recibirá el archivo, ejecuta el comando indicado por el emisor:
+### 2. Recibir un archivo
 
 ```bash
 heavydrop recv 192.168.1.45:7878
 ```
 
-O especificando una carpeta de destino:
-
-```bash
-heavydrop recv 192.168.1.45:7878 --output-dir "D:\Descargas"
-```
-
-Si el emisor configuró un token de seguridad:
-```bash
-heavydrop recv 192.168.1.45:7878 --token mi_clave_secreta_123
-```
+Opciones principales:
+- `--output-dir <DIR>`: Carpeta donde guardar el archivo (por defecto directorio actual).
+- `--token <PASSWORD>`: Clave de autenticación si el emisor la requirió.
+- `--force`: Sobrescribe archivos existentes sin preguntar.
 
 ---
 
-## 🔄 Reanudación de Descargas Interrumpidas (*Resume*)
+## 🛠️ Compilación desde el Código Fuente
 
-Si por algún motivo la transferencia se interrumpe a la mitad (por ejemplo, a los 35 GB):
+Si deseas compilar HeavyDrop desde el código fuente con Rust:
 
-1. **Vuelve a lanzar el emisor:**
+1. Clona el repositorio:
    ```bash
-   heavydrop send "archivo_50gb.iso"
+   git clone https://github.com/nicocom48-atr/Heavy.git
+   cd Heavy
    ```
-2. **Vuelve a lanzar el receptor:**
+2. Compila en modo Release:
    ```bash
-   heavydrop recv 192.168.1.45:7878
+   cargo build --release
    ```
+3. El ejecutable se genera en:
+   - `target/release/heavydrop.exe` (Windows)
 
-El receptor identificará que ya existen 35 GB descargados en el disco de destino, calculará el último fragmento íntegro y le solicitará al emisor empezar exactamente desde ese byte. **No volverás a transferir los primeros 35 GB.**
-
----
-
-## 🧪 Prueba Rápida con un Archivo Simulado de 50 GB
-
-En Windows puedes crear un archivo de prueba de 50 GB en 1 segundo usando `fsutil`:
-
-```powershell
-# Crea un archivo vacío de 50 GB al instante (53.687.091.200 bytes)
-fsutil file createnew archivo_50gb_prueba.dat 53687091200
+Para ejecutar la suite completa de pruebas:
+```bash
+cargo test
 ```
-
-Luego, en una terminal:
-```powershell
-cargo run --release -- send archivo_50gb_prueba.dat
-```
-
-Y en otra terminal (en la misma PC o en otra máquina en red):
-```powershell
-cargo run --release -- recv 127.0.0.1:7878 --output-dir ./descargas
-```
-
-Podrás ver la barra de progreso a gigabits por segundo, probar cancelarlo con `Ctrl+C` a la mitad y volver a ejecutar el comando para ver cómo reanuda (*resume*) sin perder los datos previos.
-
----
-
-## 🌐 Conexión a Través de Internet (WAN / NAT Traversal)
-
-Para transferir archivos P2P entre dos computadoras que no están en la misma red local (LAN) y están detrás de routers con NAT:
-
-1. **Opción Recomendada: VPN Mesh P2P (Tailscale o ZeroTier)**
-   - Instala [Tailscale](https://tailscale.com/) en ambas computadoras.
-   - HeavyDrop detectará la IP de Tailscale (ejemplo: `100.x.y.z`) y la conexión P2P se establecerá directamente y cifrada sin necesidad de abrir puertos en el router.
-
-2. **Opción Clásica: Reenvío de Puertos (*Port Forwarding*)**
-   - En el router del emisor, abre y redirige el puerto TCP `7878` hacia la IP local de la computadora emisora.
-   - El receptor simplemente se conecta a la IP pública del emisor: `heavydrop recv TU_IP_PUBLICA:7878`.
-
-
----
-
-## 📦 Descargas y Releases Automáticas
-
-Puedes descargar ejecutables precompilados directamente desde la sección de **[Releases en GitHub](https://github.com/nicocom48-atr/Heavy/releases)**.
-
-Cada vez que se publica una versión mediante un tag (ej. `v0.1.0`) o se ejecuta el flujo manual desde GitHub Actions, se compilan y empaquetan automáticamente binarios optimizados con sus checksums SHA-256:
-- 🪟 **Windows (x86_64):** `heavydrop-vX.Y.Z-x86_64-pc-windows-msvc.zip`
-- 🐧 **Linux (x86_64):** `heavydrop-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
-- 🍏 **macOS Apple Silicon:** `heavydrop-vX.Y.Z-aarch64-apple-darwin.tar.gz`
-- 🍎 **macOS Intel:** `heavydrop-vX.Y.Z-x86_64-apple-darwin.tar.gz`

@@ -41,7 +41,11 @@ pub fn compute_file_blake3<P: AsRef<Path>>(path: P, show_progress: bool) -> Resu
     }
 
     if let Some(pb) = pb {
-        pb.finish_with_message("Integrity hash calculated successfully!".green().to_string());
+        pb.finish_with_message(
+            "Integrity hash calculated successfully!"
+                .green()
+                .to_string(),
+        );
     }
 
     let hash = hasher.finalize();

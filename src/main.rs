@@ -1,14 +1,11 @@
 mod cli;
 mod gui;
-mod integrity;
-mod network;
-mod protocol;
-mod receiver;
-mod sender;
-mod transfer_state;
 
 use clap::Parser;
 use colored::Colorize;
+use heavydrop::manager;
+use heavydrop::receiver;
+use heavydrop::sender;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -61,6 +58,20 @@ fn launch_gui() -> ExitCode {
 }
 
 async fn run_cli(cmd: cli::Commands) -> ExitCode {
+    let manager = manager::TransferManager::new();
+
+    // Hook Ctrl+C for cooperative cancellation
+    let mgr_cancel = manager.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            println!(
+                "\n{}",
+                "Received Ctrl+C, cancelling transfer cooperatively...".yellow()
+            );
+            mgr_cancel.cancel();
+        }
+    });
+
     let result = match cmd {
         cli::Commands::Send {
             file,
@@ -71,16 +82,18 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
             no_prehash,
         } => {
             let chunk_size = chunk_size_mb.max(1) * 1024 * 1024;
-            sender::run_sender(sender::SenderConfig {
-                file_path: file,
-                bind_addr: bind,
-                port,
-                chunk_size,
-                token,
-                skip_prehash: no_prehash,
-                shared_progress: None,
-            })
-            .await
+            manager
+                .run_send(sender::SenderConfig {
+                    file_path: file,
+                    bind_addr: bind,
+                    port,
+                    chunk_size,
+                    token,
+                    skip_prehash: no_prehash,
+                    shared_progress: None,
+                    cancel_signal: None,
+                })
+                .await
         }
         cli::Commands::Recv {
             address,
@@ -88,14 +101,16 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
             token,
             force,
         } => {
-            receiver::run_receiver(receiver::ReceiverConfig {
-                peer_addr: address,
-                output_dir,
-                token,
-                force,
-                shared_progress: None,
-            })
-            .await
+            manager
+                .run_recv(receiver::ReceiverConfig {
+                    peer_addr: address,
+                    output_dir,
+                    token,
+                    force,
+                    shared_progress: None,
+                    cancel_signal: None,
+                })
+                .await
         }
         cli::Commands::Gui => unreachable!(),
     };
