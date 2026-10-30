@@ -131,7 +131,11 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
         indicatif::HumanBytes(offer.file_size),
         offer.file_size as f64 / (1024.0 * 1024.0 * 1024.0)
     );
-    println!("  BLAKE3  : {}", offer.file_hash.green());
+    if offer.file_hash != "UNVERIFIED_PREHASH" {
+        println!("  BLAKE3  : {}", offer.file_hash.green());
+    } else {
+        println!("  BLAKE3  : {}", "Verificación continua por bloque (ChaCha20-Poly1305 + BLAKE3)".green());
+    }
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();

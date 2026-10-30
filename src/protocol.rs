@@ -16,7 +16,7 @@ pub const MAX_CHUNK_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
 pub const DEFAULT_CHUNK_SIZE: u32 = 4 * 1024 * 1024; // 4 MB chunk size for high-throughput 50GB transfers
 pub const END_OF_STREAM_OFFSET: u64 = u64::MAX;
 
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 pub const CHUNK_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

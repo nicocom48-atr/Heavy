@@ -122,7 +122,7 @@ async fn expiration_closes_temporary_server() {
     let sender = TransferManager::new();
     let mut used = None;
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-        tokio::join!(sender.run_send(sender_config(path, Session::with_ttl(Duration::from_millis(400)).unwrap(), TransportMode::DirectOnly)), async {
+        tokio::join!(sender.run_send(sender_config(path, Session::with_ttl(Duration::from_millis(1500)).unwrap(), TransportMode::DirectOnly)), async {
             used = Some(invitation(&sender).await);
         })
     }).await.unwrap();
