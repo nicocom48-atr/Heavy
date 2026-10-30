@@ -36,6 +36,7 @@ pub struct HeavyDropApp {
     // Services
     discovery: Arc<DiscoveryService>,
     tokio_rt: Arc<Runtime>,
+    signal_server_input: String,
 
     // UI feedback
     copied_toast_time: Option<Instant>,
@@ -65,6 +66,8 @@ impl HeavyDropApp {
 
             discovery,
             tokio_rt: rt,
+            signal_server_input: heavydrop::signaling::SignalingClient::default_server()
+                .unwrap_or_default(),
 
             copied_toast_time: None,
             copied_toast_text: String::new(),
@@ -113,6 +116,11 @@ impl HeavyDropApp {
         self.copied_toast_time = Some(Instant::now());
     }
 
+    fn signal_server(&self) -> Option<String> {
+        let server = self.signal_server_input.trim();
+        (!server.is_empty()).then(|| server.to_string())
+    }
+
     fn cancel_send_transfer(&mut self) {
         self.send_manager.cancel();
         self.send_session = None;
@@ -148,7 +156,7 @@ impl HeavyDropApp {
             preferred_port: 7878,
             chunk_size: 4 * 1024 * 1024,
             skip_prehash: false,
-            signaling_server: heavydrop::signaling::SignalingClient::default_server(),
+            signaling_server: self.signal_server(),
             shared_progress: None,
             cancel_signal: None,
         };
@@ -175,7 +183,7 @@ impl HeavyDropApp {
             code: parsed_code,
             output_dir,
             force: false,
-            signaling_server: heavydrop::signaling::SignalingClient::default_server(),
+            signaling_server: self.signal_server(),
             shared_progress: None,
             cancel_signal: None,
             discovery: Some(self.discovery.clone()),
@@ -509,6 +517,20 @@ impl eframe::App for HeavyDropApp {
                 }
             }
         }
+
+        egui::TopBottomPanel::bottom("internet_settings").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Servidor de Internet:");
+                ui.add_enabled(!is_send_busy && !is_recv_busy,
+                    egui::TextEdit::singleline(&mut self.signal_server_input)
+                        .hint_text("servidor:7880").desired_width(240.0));
+            });
+            ui.small(if self.signal_server().is_some() {
+                "Ambos equipos deben usar el mismo servidor de señalización y relay."
+            } else {
+                "Modo LAN: para conectar entre redes distintas, configura un servidor en ambos equipos."
+            });
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let total_width = ui.available_width();
@@ -1225,8 +1247,16 @@ impl HeavyDropApp {
                     );
 
                     let dir_str = self.recv_output_dir.display().to_string();
-                    let truncated = if dir_str.len() > 24 {
-                        format!("...{}", &dir_str[dir_str.len() - 20..])
+                    let truncated = if dir_str.chars().count() > 24 {
+                        let suffix: String = dir_str
+                            .chars()
+                            .rev()
+                            .take(20)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        format!("...{}", suffix)
                     } else {
                         dir_str
                     };

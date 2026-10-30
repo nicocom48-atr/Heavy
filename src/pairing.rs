@@ -36,7 +36,7 @@ impl PairingCode {
                 // Helpful normalization of easily confused characters
                 'O' => normalized.push('0'),
                 'I' | 'L' => normalized.push('1'),
-                c if BASE32_ALPHABET.contains(&(c as u8)) => normalized.push(c),
+                c if c.is_ascii() && BASE32_ALPHABET.contains(&(c as u8)) => normalized.push(c),
                 other => bail!("Carácter no válido en el código: '{}'", other),
             }
         }

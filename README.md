@@ -54,7 +54,7 @@ Local en ms          P2P por Internet       100% Cifrado E2E (Dumb Pipe)
 1. **Códigos de Emparejamiento Seguros y Legibles:**
    - 12 caracteres en Base32 Crockford (`XXXX-XXXX-XXXX`), excluyendo caracteres ambiguos (`I`, `L`, `O`, `U`).
    - 60 bits de entropía real generados mediante entropía criptográfica del sistema operativo (`getrandom`).
-   - Caducidad automática a los 15 minutos e invalidación de un solo uso para prevenir ataques de repetición (*replay attacks*).
+   - Caducidad automática a los 5 minutos e invalidación de un solo uso para prevenir ataques de repetición (*replay attacks*).
 2. **Autenticación Mutua de Conocimiento Cero (Zero-Disclosure):**
    - El código nunca se envía en texto claro ni por la red local ni al servidor de señalización.
    - Ambas partes generan y verifican pruebas criptográficas independientes con BLAKE3 en tiempo constante (`constant_time_eq`), impidiendo ataques de intermediario (*Man-In-The-Middle*) o servidores de señalización maliciosos.
@@ -107,7 +107,12 @@ heavydrop recv KD7M-9Q2P-W8RX --output-dir "D:\Descargas"
 
 El receptor buscará al emisor por red local y señalización de Internet automáticamente.
 
-### 3. Servidor de Señalización y Relay (Opcional)
+### 3. Servidor de Señalización y Relay (necesario entre redes distintas)
+
+**No hay un servidor público configurado por defecto.** Sin configurar uno, el código
+solo permite descubrir al emisor dentro de la misma red local. Para conectar dos
+equipos en redes distintas, ambos deben utilizar el mismo servidor accesible por
+Internet. El código identifica la transferencia; no contiene una dirección de red.
 
 Si deseas alojar tu propio servicio de señalización y relay en un servidor o VPS:
 
@@ -119,6 +124,18 @@ Puedes configurar a los clientes para usar tu servidor mediante la variable de e
 ```powershell
 $env:HEAVYDROP_SIGNAL_SERVER = "tu-servidor.com:7880"
 ```
+
+En la interfaz gráfica también puedes completar **Servidor de Internet** con
+`tu-servidor.com:7880` en ambos equipos antes de iniciar la transferencia. La
+variable de entorno se lee al abrir la aplicación. El campo de la ventana se
+aplica a esa ejecución y no se guarda al cerrarla.
+
+El servidor debe aceptar TCP entrante en el puerto 7880 y ambos clientes deben
+poder conectarse a él. Si la conexión directa está bloqueada por NAT/CGNAT,
+los clientes usan el relay del mismo servidor con el mismo cifrado de extremo a
+extremo. El intercambio de candidatos por sí solo no abre puertos en el router.
+En una LAN, permite HeavyDrop en el firewall de Windows (TCP de transferencia y
+UDP 7879 para descubrimiento).
 
 ---
 

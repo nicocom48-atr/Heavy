@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 
 pub const DEFAULT_SIGNALING_PORT: u16 = 7880;
 pub const SIGNALING_TIMEOUT: Duration = Duration::from_secs(6);
+pub const RELAY_TIMEOUT: Duration = Duration::from_secs(65);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -88,8 +89,12 @@ impl SignalingClient {
             .context("Signaling connection timeout")?
             .context("Failed to connect to signaling server")?;
 
-        send_signal_msg(&mut stream, &msg).await?;
-        let resp = receive_signal_msg(&mut stream).await?;
+        let resp = tokio::time::timeout(SIGNALING_TIMEOUT, async {
+            send_signal_msg(&mut stream, &msg).await?;
+            receive_signal_msg(&mut stream).await
+        })
+        .await
+        .context("El servidor de señalización no respondió")??;
 
         match resp {
             SignalMessage::Registered { observed_ip } => Ok(Some(observed_ip)),
@@ -117,8 +122,12 @@ impl SignalingClient {
             .context("Signaling connection timeout")?
             .context("Failed to connect to signaling server")?;
 
-        send_signal_msg(&mut stream, &msg).await?;
-        let resp = receive_signal_msg(&mut stream).await?;
+        let resp = tokio::time::timeout(SIGNALING_TIMEOUT, async {
+            send_signal_msg(&mut stream, &msg).await?;
+            receive_signal_msg(&mut stream).await
+        })
+        .await
+        .context("El servidor de señalización no respondió")??;
 
         match resp {
             SignalMessage::LookupResult {
@@ -137,11 +146,7 @@ impl SignalingClient {
     }
 
     /// Establish a relay stream through the rendezvous server when direct connection is blocked by NAT
-    pub async fn connect_relay(
-        &self,
-        lookup_hash: &str,
-        role: &str,
-    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+    pub async fn connect_relay(&self, lookup_hash: &str, role: &str) -> Result<TcpStream> {
         let server = match &self.server_addr {
             Some(s) => s,
             None => bail!("No hay servidor de señalización configurado para el modo Relay"),
@@ -157,11 +162,18 @@ impl SignalingClient {
             role: role.to_string(),
         };
 
-        send_signal_msg(&mut stream, &msg).await?;
-        let resp = receive_signal_msg(&mut stream).await?;
+        let resp = tokio::time::timeout(RELAY_TIMEOUT, async {
+            send_signal_msg(&mut stream, &msg).await?;
+            receive_signal_msg(&mut stream).await
+        })
+        .await
+        .context("El otro equipo no se conectó al relay a tiempo")??;
 
         match resp {
-            SignalMessage::RelayReady => Ok(Box::new(stream)),
+            SignalMessage::RelayReady => {
+                stream.set_nodelay(true)?;
+                Ok(stream)
+            }
             SignalMessage::Error { message } => bail!("Relay error: {}", message),
             other => bail!("Unexpected response from relay server: {:?}", other),
         }

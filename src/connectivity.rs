@@ -22,6 +22,14 @@ pub struct EstablishedConnection {
     pub peer_description: String,
 }
 
+// Stop advertising on success, failure, or when the connection future is cancelled.
+struct BeaconGuard(tokio::task::JoinHandle<()>);
+impl Drop for BeaconGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Sender-side connection establishment: listens on LAN and registers with signaling
 pub async fn establish_sender_connection(
     session: &Session,
@@ -40,11 +48,11 @@ pub async fn establish_sender_connection(
     let local_port = listener.local_addr()?.port();
 
     // 2. Spawn blind UDP beacon for instant local LAN discovery
-    spawn_blind_beacon(
+    let _beacon = BeaconGuard(spawn_blind_beacon(
         session.code().lan_blind_ticket(),
         local_port,
         cancel_signal.clone(),
-    );
+    ));
 
     // 3. Register on signaling server if available
     let mut candidates = Vec::new();
@@ -53,9 +61,10 @@ pub async fn establish_sender_connection(
     }
 
     let lookup_hash = session.code().signaling_lookup_hash();
-    let _ = signal_client
+    signal_client
         .register_session(&lookup_hash, &candidates)
-        .await;
+        .await
+        .context("No se pudo registrar la transferencia en Internet. Comprueba el servidor configurado o deja el campo vacío para usar solo LAN")?;
 
     // 4. Wait for incoming direct connection or cancellation
     tokio::select! {
@@ -74,6 +83,26 @@ pub async fn establish_sender_connection(
                 stream: Box::new(stream),
                 conn_type,
                 peer_description: peer_addr.to_string(),
+            })
+        }
+        relay = async {
+            if signal_client.is_available() {
+                loop {
+                    match signal_client.connect_relay(&lookup_hash, "sender").await {
+                        Ok(stream) => return stream,
+                        Err(error) => {
+                            eprintln!("Relay: {error:#}");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+            std::future::pending::<TcpStream>().await
+        } => {
+            Ok(EstablishedConnection {
+                stream: Box::new(relay),
+                conn_type: ConnectionType::Relay,
+                peer_description: "Relay cifrado".to_string(),
             })
         }
         _ = async {
@@ -101,7 +130,9 @@ pub async fn establish_receiver_connection(
 ) -> Result<EstablishedConnection> {
     // 1. Attempt LAN discovery first (up to 3 seconds)
     if let Some(lan_addr) = discovery.resolve_local(code, Duration::from_secs(3)).await {
-        if let Ok(stream) = TcpStream::connect(lan_addr).await {
+        if let Ok(Ok(stream)) =
+            tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(lan_addr)).await
+        {
             let _ = stream.set_nodelay(true);
             return Ok(EstablishedConnection {
                 stream: Box::new(stream),
@@ -117,13 +148,15 @@ pub async fn establish_receiver_connection(
 
     // 2. Query signaling server for candidate endpoints
     let lookup_hash = code.signaling_lookup_hash();
+    if !signal_client.is_available() {
+        bail!("No se encontró al emisor en la red local. Para conectar entre redes distintas, configura el mismo servidor de señalización en ambos equipos (HEAVYDROP_SIGNAL_SERVER o el campo Servidor de Internet). Comprueba también el permiso de HeavyDrop en el firewall de Windows.");
+    }
     let lookup_res = signal_client
         .lookup_session(&lookup_hash)
         .await
-        .ok()
-        .flatten();
+        .context("No se pudo consultar el servidor de señalización. Comprueba la dirección y el puerto en ambos equipos")?;
 
-    if let Some((candidates, observed_ip)) = lookup_res {
+    if let Some((candidates, _observed_ip)) = lookup_res {
         // Try connecting to candidate IPs
         for cand in &candidates {
             if cancel_signal.load(Ordering::Relaxed) {
@@ -149,34 +182,19 @@ pub async fn establish_receiver_connection(
             }
         }
 
-        // Also try connecting directly to the observed external IP on default port
-        if let Ok(ip) = observed_ip.parse() {
-            let direct_addr = SocketAddr::new(ip, 7878);
-            if let Ok(Ok(stream)) =
-                tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(direct_addr)).await
-            {
-                let _ = stream.set_nodelay(true);
-                return Ok(EstablishedConnection {
-                    stream: Box::new(stream),
-                    conn_type: ConnectionType::DirectInternet,
-                    peer_description: format!("Directo WAN ({})", direct_addr),
-                });
-            }
-        }
-    }
-
-    // 3. Fallback: If direct connection could not be established and signaling is available, connect via Relay
-    if signal_client.is_available() {
-        if let Ok(_stream) = signal_client.connect_relay(&lookup_hash, "receiver").await {
-            // Note: Over the relay stream, the same E2E ChaCha20-Poly1305 encryption runs!
-            // The relay server cannot read the data.
-            // For bidirectional AsyncStream, we bridge or use the underlying TCP stream
-            bail!("Modo Relay no implementado en este entorno de red");
-        }
+        let stream = signal_client
+            .connect_relay(&lookup_hash, "receiver")
+            .await
+            .context("Falló la conexión mediante relay")?;
+        return Ok(EstablishedConnection {
+            stream: Box::new(stream),
+            conn_type: ConnectionType::Relay,
+            peer_description: "Relay cifrado".to_string(),
+        });
     }
 
     bail!(
-        "No se pudo encontrar al emisor con el código {}. Verifica que el emisor mantenga la aplicación abierta y en la misma red.",
+        "No se encontró una sesión activa para el código {}. Comprueba que no haya expirado, que el emisor haya terminado de preparar el archivo y que ambos equipos usen el mismo servidor de Internet.",
         code.formatted()
     );
 }
