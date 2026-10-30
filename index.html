@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HeavyDrop — P2P File Transfer</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            cyber: {
+              bg: '#080c14',
+              card: '#0a101d',
+              accent: '#06b6d4',
+            }
+          },
+          boxShadow: {
+            'cyber-glow': '0 0 50px -10px rgba(6, 182, 212, 0.25), 0 0 20px -5px rgba(59, 130, 246, 0.2)',
+            'btn-glow': '0 0 25px rgba(6, 182, 212, 0.4)',
+            'btn-glow-hover': '0 0 35px rgba(6, 182, 212, 0.6)',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    body {
+      font-family: 'Inter', sans-serif;
+    }
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    /* Estilo sutil de scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #080c14;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1e293b;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body class="bg-[#080c14] text-slate-100 min-h-screen flex items-center justify-center p-4 selection:bg-cyan-500/30 selection:text-cyan-200">
+
+  <!-- Contenedor Principal Centrado -->
+  <main class="w-full max-w-4xl flex flex-col gap-5">
+    
+    <!-- Cabecera Superior (Header) -->
+    <header class="flex items-center justify-between px-2 sm:px-1">
+      <!-- Logo y Badges Izquierda -->
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+          <i data-lucide="zap" class="w-6 h-6 text-cyan-400 fill-cyan-400"></i>
+          <span class="text-xl sm:text-2xl font-semibold tracking-tight text-white">HeavyDrop</span>
+        </div>
+        <span class="px-2.5 py-0.5 text-xs font-medium text-slate-400 bg-slate-900/80 border border-slate-800 rounded-full">
+          P2P 50GB+
+        </span>
+      </div>
+
+      <!-- Estado de Red Derecha -->
+      <div class="flex items-center gap-2 px-3.5 py-1.5 bg-emerald-950/20 border border-emerald-500/30 rounded-full text-xs font-medium text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
+        <span>Red P2P Activa</span>
+        <span class="relative flex h-2 w-2">
+          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Tarjeta Principal con Borde Resplandeciente (Cyber Glow) -->
+    <div class="relative rounded-[2rem] p-[1px] bg-gradient-to-b from-cyan-500/40 via-blue-500/20 to-cyan-500/10 shadow-cyber-glow">
+      <div class="bg-[#090e19]/90 backdrop-blur-2xl rounded-[1.95rem] p-6 sm:p-8">
+        
+        <!-- Grid Responsivo de 2 Columnas -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 lg:gap-8">
+          
+          <!-- COLUMNA 1: Enviar Archivo -->
+          <section class="flex flex-col gap-4">
+            <!-- Título de Sección -->
+            <div class="flex items-center gap-2 text-slate-100 font-semibold text-base sm:text-lg">
+              <i data-lucide="upload" class="w-5 h-5 text-cyan-400"></i>
+              <h2>Enviar archivo</h2>
+            </div>
+
+            <!-- Zona de Arrastre (Dropzone) -->
+            <div id="dropzone" 
+                 class="relative border-2 border-dashed border-cyan-500/40 hover:border-cyan-400 bg-cyan-950/10 hover:bg-cyan-950/20 rounded-2xl p-6 transition-all duration-300 flex flex-col items-center justify-center text-center cursor-pointer group min-h-[155px]">
+              <input type="file" id="file-input" class="hidden">
+              
+              <!-- Contenido Inicial del Dropzone -->
+              <div id="dropzone-idle" class="flex flex-col items-center">
+                <div class="p-2.5 rounded-full bg-cyan-500/10 text-cyan-400 group-hover:scale-110 group-hover:bg-cyan-500/20 transition-all duration-300 mb-2">
+                  <i data-lucide="file-text" class="w-7 h-7"></i>
+                </div>
+                <p class="text-sm font-medium text-slate-200">Arrastrá un archivo aquí</p>
+                <p class="text-xs text-slate-400 mt-1">o hacé clic para explorar (hasta 1 TB+)</p>
+              </div>
+
+              <!-- Contenido cuando se selecciona un archivo (Oculto inicialmente) -->
+              <div id="dropzone-file-selected" class="hidden flex-col items-center gap-2">
+                <div class="p-2.5 rounded-full bg-emerald-500/10 text-emerald-400">
+                  <i data-lucide="file-check" class="w-7 h-7"></i>
+                </div>
+                <div class="text-center max-w-[240px]">
+                  <p id="file-name" class="text-sm font-semibold text-slate-200 truncate">archivo_seleccionado.iso</p>
+                  <p id="file-size" class="text-xs text-slate-400 mt-0.5">0 MB</p>
+                </div>
+                <button type="button" id="btn-remove-file" class="mt-1 text-[11px] text-red-400 hover:text-red-300 underline cursor-pointer">
+                  Cambiar archivo
+                </button>
+              </div>
+            </div>
+
+            <!-- Código de Conexión Generado -->
+            <div class="flex flex-col gap-1.5">
+              <label class="text-xs font-medium text-slate-400">Código de conexión</label>
+              <div class="flex items-center justify-between px-4 py-3 bg-slate-900/80 border border-slate-800 rounded-xl">
+                <span id="display-code" class="font-mono text-sm tracking-widest text-slate-400 select-all">
+                  •••• — •••• — ••••
+                </span>
+                <button type="button" id="btn-copy-code" class="hidden items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-cyan-400 bg-cyan-950/40 hover:bg-cyan-900/50 border border-cyan-800/60 rounded-lg transition-all cursor-pointer">
+                  <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                  <span id="copy-btn-text">Copiar</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Botón de Acción Principal -->
+            <button type="button" id="btn-create-transfer"
+                    class="w-full py-3.5 px-4 bg-gradient-to-r from-blue-600 via-cyan-400 to-cyan-300 hover:from-blue-500 hover:via-cyan-300 hover:to-cyan-200 text-slate-950 font-bold text-sm sm:text-base rounded-xl shadow-btn-glow hover:shadow-btn-glow-hover active:scale-[0.98] transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer">
+              <i data-lucide="zap" class="w-4 h-4 fill-slate-950 text-slate-950"></i>
+              <span id="btn-create-text">Crear transferencia</span>
+            </button>
+
+            <!-- Tiempo de Expiración -->
+            <div class="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
+              <i data-lucide="clock" class="w-3.5 h-3.5 text-slate-500"></i>
+              <span id="expiration-timer-text">Expira en 5 minutos tras crearse</span>
+            </div>
+          </section>
+
+          <!-- COLUMNA 2: Recibir Archivo -->
+          <section class="flex flex-col gap-4">
+            <!-- Título de Sección -->
+            <div class="flex items-center gap-2 text-slate-100 font-semibold text-base sm:text-lg">
+              <i data-lucide="download" class="w-5 h-5 text-cyan-400"></i>
+              <h2>Recibir archivo</h2>
+            </div>
+
+            <!-- Input Código del Emisor -->
+            <div class="flex flex-col gap-1.5">
+              <label for="input-receive-code" class="text-xs font-medium text-slate-400">
+                Ingresá el código del emisor
+              </label>
+              <input type="text" 
+                     id="input-receive-code"
+                     maxlength="14" 
+                     placeholder="XXXX-XXXX-XXXX" 
+                     class="w-full px-4 py-3 bg-slate-900/80 border border-slate-800 focus:border-cyan-500/70 focus:ring-1 focus:ring-cyan-500/50 rounded-xl text-sm font-mono tracking-widest text-slate-100 placeholder-slate-600 uppercase transition-all duration-200 outline-none">
+            </div>
+
+            <!-- Botón Usar Código -->
+            <button type="button" id="btn-use-code"
+                    class="w-full py-3 px-4 bg-white/[0.05] hover:bg-white/[0.09] active:bg-white/[0.12] border border-white/10 hover:border-white/20 text-slate-200 text-sm font-medium rounded-xl transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer">
+              <i data-lucide="link-2" class="w-4 h-4 text-slate-400"></i>
+              <span id="btn-use-text">Usar código</span>
+            </button>
+
+            <!-- Tarjeta de Estado: Listo para Recibir -->
+            <div id="receive-status-box" class="p-4 bg-slate-900/40 border border-slate-800/80 rounded-2xl flex flex-col gap-3 transition-all">
+              <div class="flex items-start gap-3">
+                <div class="p-2 bg-slate-800/60 rounded-lg text-slate-400 shrink-0">
+                  <i data-lucide="file" class="w-5 h-5"></i>
+                </div>
+                <div class="flex flex-col">
+                  <h3 class="text-xs sm:text-sm font-semibold text-slate-200" id="receive-title">Listo para recibir</h3>
+                  <p class="text-[11px] sm:text-xs text-slate-400 mt-0.5" id="receive-desc">
+                    Ingresá el código del emisor arriba para iniciar la descarga
+                  </p>
+                </div>
+              </div>
+
+              <!-- Indicador de Cifrado y Seguridad -->
+              <div class="flex items-center gap-2 pt-2 border-t border-slate-800/60 text-[11px] text-emerald-400/90 font-medium">
+                <i data-lucide="shield-check" class="w-4 h-4 text-emerald-400"></i>
+                <span>Cifrado E2EE ChaCha20-Poly1305 • P2P directo</span>
+              </div>
+            </div>
+
+            <!-- Selector de Carpeta de Guardado -->
+            <div class="flex items-center justify-between p-3 bg-slate-900/60 border border-slate-800/80 rounded-xl text-xs">
+              <div class="flex items-center gap-2 min-w-0 pr-2">
+                <i data-lucide="folder" class="w-4 h-4 text-cyan-400 shrink-0"></i>
+                <span class="text-slate-400 shrink-0">Guardar en:</span>
+                <span id="output-folder-path" class="text-slate-200 font-mono truncate" title="C:\Users\nico_\Downloads">
+                  C:\Users\nico_\Downloads
+                </span>
+              </div>
+              <button type="button" id="btn-change-folder" class="px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700/80 border border-slate-700 rounded-lg transition-all shrink-0 cursor-pointer">
+                Cambiar
+              </button>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- JavaScript Interactivo -->
+  <script>
+    // Inicializar iconos de Lucide
+    lucide.createIcons();
+
+    // 1. Manejo de Drag & Drop y Selección de Archivo
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const dropzoneIdle = document.getElementById('dropzone-idle');
+    const dropzoneSelected = document.getElementById('dropzone-file-selected');
+    const fileNameEl = document.getElementById('file-name');
+    const fileSizeEl = document.getElementById('file-size');
+    const btnRemoveFile = document.getElementById('btn-remove-file');
+    let selectedFile = null;
+
+    dropzone.addEventListener('click', (e) => {
+      if (e.target !== btnRemoveFile) {
+        fileInput.click();
+      }
+    });
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+      dropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.add('border-cyan-400', 'bg-cyan-950/30', 'scale-[1.01]');
+      });
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      dropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.remove('border-cyan-400', 'bg-cyan-950/30', 'scale-[1.01]');
+      });
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        handleFileSelect(files[0]);
+      }
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        handleFileSelect(e.target.files[0]);
+      }
+    });
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function handleFileSelect(file) {
+      selectedFile = file;
+      fileNameEl.textContent = file.name;
+      fileSizeEl.textContent = formatBytes(file.size);
+      dropzoneIdle.classList.add('hidden');
+      dropzoneSelected.classList.remove('hidden');
+      dropzoneSelected.classList.add('flex');
+    }
+
+    btnRemoveFile.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectedFile = null;
+      fileInput.value = '';
+      dropzoneSelected.classList.add('hidden');
+      dropzoneSelected.classList.remove('flex');
+      dropzoneIdle.classList.remove('hidden');
+    });
+
+    // 2. Generación de Código y Transferencia Emisor
+    const btnCreateTransfer = document.getElementById('btn-create-transfer');
+    const displayCode = document.getElementById('display-code');
+    const btnCopyCode = document.getElementById('btn-copy-code');
+    const copyBtnText = document.getElementById('copy-btn-text');
+    const expirationTimerText = document.getElementById('expiration-timer-text');
+    let timerInterval = null;
+
+    function generateSessionCode() {
+      const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+      let code = '';
+      for (let i = 0; i < 12; i++) {
+        if (i > 0 && i % 4 === 0) code += '-';
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return code;
+    }
+
+    function startTimer(durationSeconds) {
+      clearInterval(timerInterval);
+      let timer = durationSeconds;
+      timerInterval = setInterval(() => {
+        const minutes = String(Math.floor(timer / 60)).padStart(2, '0');
+        const seconds = String(timer % 60).padStart(2, '0');
+        expirationTimerText.textContent = `Expira en ${minutes}:${seconds}`;
+        if (--timer < 0) {
+          clearInterval(timerInterval);
+          expirationTimerText.textContent = 'Código expirado';
+          displayCode.textContent = '•••• — •••• — ••••';
+          btnCopyCode.classList.add('hidden');
+        }
+      }, 1000);
+    }
+
+    btnCreateTransfer.addEventListener('click', () => {
+      // Si no seleccionó archivo, simula uno de prueba para una experiencia fluida
+      if (!selectedFile) {
+        handleFileSelect({ name: 'frieren4.mkv', size: 7654321987 });
+      }
+
+      // Animación visual de botón
+      btnCreateTransfer.classList.add('opacity-90', 'scale-[0.98]');
+      setTimeout(() => btnCreateTransfer.classList.remove('opacity-90', 'scale-[0.98]'), 150);
+
+      const code = generateSessionCode();
+      displayCode.textContent = code;
+      displayCode.classList.remove('text-slate-400');
+      displayCode.classList.add('text-cyan-300', 'font-bold');
+
+      btnCopyCode.classList.remove('hidden');
+      btnCopyCode.classList.add('flex');
+      startTimer(300); // 5 minutos
+    });
+
+    btnCopyCode.addEventListener('click', async () => {
+      const code = displayCode.textContent.trim();
+      if (code && !code.includes('•')) {
+        await navigator.clipboard.writeText(code);
+        copyBtnText.textContent = '¡Copiado!';
+        setTimeout(() => {
+          copyBtnText.textContent = 'Copiar';
+        }, 1800);
+      }
+    });
+
+    // 3. Formateo y Validación del Input del Receptor
+    const inputReceiveCode = document.getElementById('input-receive-code');
+    const btnUseCode = document.getElementById('btn-use-code');
+    const receiveTitle = document.getElementById('receive-title');
+    const receiveDesc = document.getElementById('receive-desc');
+
+    inputReceiveCode.addEventListener('input', (e) => {
+      let raw = e.target.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      let parts = [];
+      for (let i = 0; i < raw.length && i < 12; i += 4) {
+        parts.push(raw.substring(i, i + 4));
+      }
+      e.target.value = parts.join('-');
+
+      if (e.target.value.length === 14) {
+        btnUseCode.classList.remove('bg-white/[0.05]', 'text-slate-200');
+        btnUseCode.classList.add('bg-cyan-500', 'text-slate-950', 'font-semibold', 'shadow-btn-glow');
+      } else {
+        btnUseCode.classList.add('bg-white/[0.05]', 'text-slate-200');
+        btnUseCode.classList.remove('bg-cyan-500', 'text-slate-950', 'font-semibold', 'shadow-btn-glow');
+      }
+    });
+
+    btnUseCode.addEventListener('click', () => {
+      const code = inputReceiveCode.value.trim();
+      if (code.length === 14) {
+        receiveTitle.textContent = "Conectando al emisor...";
+        receiveDesc.textContent = `Buscando sesión con código ${code}...`;
+        btnUseCode.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i><span>Conectando...</span>`;
+        lucide.createIcons();
+
+        setTimeout(() => {
+          receiveTitle.textContent = "Transferencia en progreso";
+          receiveDesc.textContent = "Descargando frieren4.mkv (7.13 GiB) a 145 MB/s";
+          btnUseCode.innerHTML = `<i data-lucide="check" class="w-4 h-4 text-emerald-400"></i><span class="text-emerald-400">Conectado P2P</span>`;
+          lucide.createIcons();
+        }, 1200);
+      } else {
+        inputReceiveCode.focus();
+        inputReceiveCode.classList.add('border-red-500/80');
+        setTimeout(() => inputReceiveCode.classList.remove('border-red-500/80'), 1000);
+      }
+    });
+
+    // 4. Selector de Carpeta
+    const btnChangeFolder = document.getElementById('btn-change-folder');
+    const folderPathEl = document.getElementById('output-folder-path');
+    btnChangeFolder.addEventListener('click', () => {
+      const newPath = prompt('Ingresá la ruta de guardado:', folderPathEl.textContent.trim());
+      if (newPath) {
+        folderPathEl.textContent = newPath;
+        folderPathEl.title = newPath;
+      }
+    });
+  </script>
+</body>
+</html>
