@@ -21,6 +21,14 @@ use crate::{
 
 pub const ALPN: &[u8] = b"heavydrop/4";
 
+pub fn high_throughput_transport_config() -> iroh::endpoint::QuicTransportConfig {
+    iroh::endpoint::QuicTransportConfig::builder()
+        .stream_receive_window(iroh::endpoint::VarInt::from_u32(32 * 1024 * 1024))
+        .receive_window(iroh::endpoint::VarInt::from_u32(64 * 1024 * 1024))
+        .send_window(64 * 1024 * 1024)
+        .build()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TransportMode {
     #[default]
@@ -68,7 +76,8 @@ pub async fn listen_sender(
     };
     let mut builder = Endpoint::builder(presets::Minimal)
             .alpns(vec![ALPN.to_vec()])
-            .relay_mode(relay_mode);
+            .relay_mode(relay_mode)
+            .transport_config(high_throughput_transport_config());
     if matches!(mode, TransportMode::RelayOnly(_)) { builder = builder.clear_ip_transports(); }
     let mut owner = EndpointGuard(Some(
         builder
@@ -154,6 +163,7 @@ pub async fn connect_receiver(
     let owner = EndpointGuard(Some(
         Endpoint::builder(presets::Minimal)
             .relay_mode(relay_mode)
+            .transport_config(high_throughput_transport_config())
             .bind()
             .await?,
     ));

@@ -310,18 +310,22 @@ pub async fn send_encrypted_chunk<W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let checksum = blake3::hash(plaintext);
 
-    writer.write_u64(offset).await?;
-    writer.write_u32(ciphertext.len() as u32).await?;
-    writer.write_all(checksum.as_bytes()).await?;
+    let mut header = [0u8; 44];
+    header[0..8].copy_from_slice(&offset.to_be_bytes());
+    header[8..12].copy_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    header[12..44].copy_from_slice(checksum.as_bytes());
+
+    writer.write_all(&header).await?;
     writer.write_all(ciphertext).await?;
     Ok(())
 }
 
 /// Send end-of-stream signal
 pub async fn send_end_of_stream<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
-    writer.write_u64(END_OF_STREAM_OFFSET).await?;
-    writer.write_u32(0).await?;
-    writer.write_all(&[0u8; 32]).await?;
+    let mut buf = [0u8; 44];
+    buf[0..8].copy_from_slice(&END_OF_STREAM_OFFSET.to_be_bytes());
+    buf[8..12].copy_from_slice(&0u32.to_be_bytes());
+    writer.write_all(&buf).await?;
     writer.flush().await?;
     Ok(())
 }

@@ -28,6 +28,7 @@ pub struct ReceiverConfig {
     pub shared_progress: Option<SharedProgress>,
     pub cancel_signal: Option<Arc<AtomicBool>>,
     pub discovery: Option<Arc<DiscoveryService>>,
+    pub speed_limiter: Option<crate::speed_limiter::SpeedLimiter>,
 }
 
 pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
@@ -294,6 +295,11 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
             .await?;
 
         let bytes_len = plaintext.len() as u64;
+
+        if let Some(ref limiter) = config.speed_limiter {
+            limiter.consume(bytes_len as usize).await;
+        }
+
         current_offset += bytes_len;
         chunk_index += 1;
         bytes_since_last_update += bytes_len;

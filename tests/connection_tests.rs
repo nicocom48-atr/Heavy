@@ -114,6 +114,7 @@ async fn missing_server_is_visible_as_failed_and_can_retry() {
                 shared_progress: None,
                 cancel_signal: None,
                 discovery: None,
+                speed_limiter: None,
             })
             .await;
         assert!(result.is_err());

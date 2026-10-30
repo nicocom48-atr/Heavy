@@ -130,6 +130,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
                 signaling_server: configured_server,
                 shared_progress: None,
                 cancel_signal: None,
+                speed_limiter: None,
             };
 
             manager.run_send(config).await
@@ -156,6 +157,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
                 shared_progress: None,
                 cancel_signal: None,
                 discovery: None,
+                speed_limiter: None,
             };
 
             manager.run_recv(config).await

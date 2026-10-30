@@ -39,7 +39,7 @@ async fn port_is_released(code: &PairingCode) {
 
 fn sender_config(file_path: PathBuf, session: Session, transport_mode: TransportMode) -> SenderConfig {
     SenderConfig { transport_mode, file_path, session, preferred_port: 0, chunk_size: 64 * 1024,
-        skip_prehash: false, signaling_server: None, shared_progress: None, cancel_signal: None }
+        skip_prehash: false, signaling_server: None, shared_progress: None, cancel_signal: None, speed_limiter: None }
 }
 
 async fn transfer(mode: TransportMode, bytes: &[u8], name: &str) {
@@ -57,7 +57,7 @@ async fn transfer(mode: TransportMode, bytes: &[u8], name: &str) {
             let code = invitation(&sender).await;
             used_code = Some(code.clone());
             receiver.run_recv(ReceiverConfig { code, output_dir: output.clone(), force: false,
-                signaling_server: None, shared_progress: None, cancel_signal: None, discovery: None }).await
+                signaling_server: None, shared_progress: None, cancel_signal: None, discovery: None, speed_limiter: None }).await
         })
     }).await.unwrap();
     sent.unwrap();

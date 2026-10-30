@@ -303,6 +303,7 @@ async fn test_full_end_to_end_transfer_using_code_only() {
                 signaling_server: None,
                 shared_progress: None,
                 cancel_signal: None,
+                speed_limiter: None,
             })
             .await
     });
@@ -321,6 +322,7 @@ async fn test_full_end_to_end_transfer_using_code_only() {
                 shared_progress: None,
                 cancel_signal: None,
                 discovery: None,
+                speed_limiter: None,
             })
             .await
     });
@@ -366,6 +368,7 @@ async fn test_empty_file_transfer_using_code() {
                 signaling_server: None,
                 shared_progress: None,
                 cancel_signal: None,
+                speed_limiter: None,
             })
             .await
     });
@@ -383,6 +386,7 @@ async fn test_empty_file_transfer_using_code() {
                 shared_progress: None,
                 cancel_signal: None,
                 discovery: None,
+                speed_limiter: None,
             })
             .await
     });
@@ -425,6 +429,7 @@ async fn test_wrong_code_mutual_authentication_failure() {
                 signaling_server: None,
                 shared_progress: None,
                 cancel_signal: None,
+                speed_limiter: None,
             })
             .await
     });
@@ -494,6 +499,7 @@ async fn test_cooperative_cancellation_during_transfer() {
                 signaling_server: None,
                 shared_progress: None,
                 cancel_signal: None,
+                speed_limiter: None,
             })
             .await
     });

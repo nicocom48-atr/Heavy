@@ -41,6 +41,13 @@ pub struct HeavyDropApp {
     // UI feedback
     copied_toast_time: Option<Instant>,
     copied_toast_text: String,
+
+    // Bandwidth Speed Limiters & Sidebar
+    upload_limiter: heavydrop::speed_limiter::SpeedLimiter,
+    download_limiter: heavydrop::speed_limiter::SpeedLimiter,
+    speed_sidebar_open: bool,
+    upload_limit_mb: u32,
+    download_limit_mb: u32,
 }
 
 impl HeavyDropApp {
@@ -51,6 +58,8 @@ impl HeavyDropApp {
         let send_manager = TransferManager::new();
         let recv_manager = TransferManager::new();
         let discovery = Arc::new(DiscoveryService::new());
+        let upload_limiter = heavydrop::speed_limiter::SpeedLimiter::default();
+        let download_limiter = heavydrop::speed_limiter::SpeedLimiter::default();
 
         Self {
             active_tab: ActiveTab::Send,
@@ -71,6 +80,12 @@ impl HeavyDropApp {
 
             copied_toast_time: None,
             copied_toast_text: String::new(),
+
+            upload_limiter,
+            download_limiter,
+            speed_sidebar_open: false,
+            upload_limit_mb: 0,
+            download_limit_mb: 0,
         }
     }
 
@@ -164,6 +179,7 @@ impl HeavyDropApp {
             signaling_server: self.signal_server(),
             shared_progress: None,
             cancel_signal: None,
+            speed_limiter: Some(self.upload_limiter.clone()),
         };
 
         let mgr = self.send_manager.clone();
@@ -192,6 +208,7 @@ impl HeavyDropApp {
             shared_progress: None,
             cancel_signal: None,
             discovery: Some(self.discovery.clone()),
+            speed_limiter: Some(self.download_limiter.clone()),
         };
 
         let mgr = self.recv_manager.clone();
@@ -540,6 +557,24 @@ impl eframe::App for HeavyDropApp {
             });
         });
 
+        if self.speed_sidebar_open {
+            egui::SidePanel::right("speed_sidebar")
+                .resizable(false)
+                .default_width(310.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(13, 13, 17))
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+                        ))
+                        .inner_margin(egui::Margin::symmetric(18.0, 20.0)),
+                )
+                .show(ctx, |ui| {
+                    self.render_speed_sidebar(ui);
+                });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let total_width = ui.available_width();
             let total_height = ui.available_height();
@@ -649,7 +684,7 @@ impl eframe::App for HeavyDropApp {
 }
 
 impl HeavyDropApp {
-    fn render_header(&self, ui: &mut egui::Ui) {
+    fn render_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // Left: HeavyDrop Brand + Tech Badge
             draw_bolt_icon(ui, 20.0, egui::Color32::from_rgb(14, 165, 233)); // Electric Cyan
@@ -680,8 +715,63 @@ impl HeavyDropApp {
                     );
                 });
 
-            // Right: Discrete Network Status Badge
+            // Right: Speed Limiter Toggle + Discrete Network Status Badge
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Button to toggle Speed Limiter Sidebar
+                let btn_text = if self.upload_limit_mb > 0 || self.download_limit_mb > 0 {
+                    let mut s = String::from("⚡ ");
+                    if self.upload_limit_mb > 0 {
+                        s.push_str(&format!("↑{}MB ", self.upload_limit_mb));
+                    }
+                    if self.download_limit_mb > 0 {
+                        s.push_str(&format!("↓{}MB", self.download_limit_mb));
+                    }
+                    s
+                } else if self.speed_sidebar_open {
+                    "⚡ Límites ▾".to_string()
+                } else {
+                    "⚡ Velocidad".to_string()
+                };
+
+                let (btn_fill, btn_color) = if self.speed_sidebar_open {
+                    (
+                        egui::Color32::from_rgb(14, 165, 233),
+                        egui::Color32::WHITE,
+                    )
+                } else if self.upload_limit_mb > 0 || self.download_limit_mb > 0 {
+                    (
+                        egui::Color32::from_rgb(20, 35, 50),
+                        egui::Color32::from_rgb(56, 189, 248),
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(22, 22, 28),
+                        egui::Color32::from_rgb(212, 212, 216),
+                    )
+                };
+
+                let speed_btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(btn_text)
+                            .size(11.0)
+                            .strong()
+                            .color(btn_color),
+                    )
+                    .fill(btn_fill)
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 25),
+                    ))
+                    .rounding(12.0),
+                );
+
+                if speed_btn.clicked() {
+                    self.speed_sidebar_open = !self.speed_sidebar_open;
+                }
+
+                ui.add_space(8.0);
+
+                // Discrete Network Status Badge
                 egui::Frame::group(ui.style())
                     .fill(egui::Color32::from_rgb(14, 22, 18))
                     .stroke(egui::Stroke::new(
@@ -710,6 +800,197 @@ impl HeavyDropApp {
                     });
             });
         });
+    }
+
+    fn render_speed_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            draw_bolt_icon(ui, 18.0, egui::Color32::from_rgb(14, 165, 233));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Límites de Velocidad")
+                    .size(16.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(250, 250, 250)),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(
+                        egui::RichText::new("✕")
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(156, 163, 175)),
+                    )
+                    .clicked()
+                {
+                    self.speed_sidebar_open = false;
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Controla el ancho de banda máximo en tiempo real.")
+                .size(11.5)
+                .color(egui::Color32::from_rgb(148, 163, 184)),
+        );
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // 1. Upload Section
+        ui.horizontal(|ui| {
+            draw_upload_icon(ui, egui::Color32::from_rgb(56, 189, 248));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Velocidad de Subida")
+                    .size(13.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(244, 244, 245)),
+            );
+        });
+
+        let mut up_limited = self.upload_limit_mb > 0;
+        let mut up_changed = false;
+        if ui.checkbox(&mut up_limited, "Limitar subida").changed() {
+            if up_limited {
+                if self.upload_limit_mb == 0 {
+                    self.upload_limit_mb = 10;
+                }
+            } else {
+                self.upload_limit_mb = 0;
+            }
+            up_changed = true;
+        }
+
+        if up_limited {
+            ui.add_space(4.0);
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.upload_limit_mb, 1..=500)
+                        .suffix(" MB/s")
+                        .logarithmic(true)
+                        .text("Máximo"),
+                )
+                .changed()
+            {
+                up_changed = true;
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for preset in [5, 10, 25, 50, 100] {
+                    let active = self.upload_limit_mb == preset;
+                    if ui.selectable_label(active, format!("{} MB/s", preset)).clicked() {
+                        self.upload_limit_mb = preset;
+                        up_changed = true;
+                    }
+                }
+            });
+        } else {
+            ui.label(
+                egui::RichText::new("⚡ Sin límite (máxima velocidad)")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(74, 222, 128)),
+            );
+        }
+
+        if up_changed {
+            self.upload_limiter.set_limit_mbps(self.upload_limit_mb as u64);
+        }
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // 2. Download Section
+        ui.horizontal(|ui| {
+            draw_download_icon(ui, egui::Color32::from_rgb(34, 197, 94));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Velocidad de Bajada")
+                    .size(13.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(244, 244, 245)),
+            );
+        });
+
+        let mut down_limited = self.download_limit_mb > 0;
+        let mut down_changed = false;
+        if ui.checkbox(&mut down_limited, "Limitar bajada").changed() {
+            if down_limited {
+                if self.download_limit_mb == 0 {
+                    self.download_limit_mb = 10;
+                }
+            } else {
+                self.download_limit_mb = 0;
+            }
+            down_changed = true;
+        }
+
+        if down_limited {
+            ui.add_space(4.0);
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.download_limit_mb, 1..=500)
+                        .suffix(" MB/s")
+                        .logarithmic(true)
+                        .text("Máximo"),
+                )
+                .changed()
+            {
+                down_changed = true;
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for preset in [5, 10, 25, 50, 100] {
+                    let active = self.download_limit_mb == preset;
+                    if ui.selectable_label(active, format!("{} MB/s", preset)).clicked() {
+                        self.download_limit_mb = preset;
+                        down_changed = true;
+                    }
+                }
+            });
+        } else {
+            ui.label(
+                egui::RichText::new("⚡ Sin límite (máxima velocidad)")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(74, 222, 128)),
+            );
+        }
+
+        if down_changed {
+            self.download_limiter.set_limit_mbps(self.download_limit_mb as u64);
+        }
+
+        ui.add_space(20.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // 3. Performance & Protocol Info Card
+        egui::Frame::group(ui.style())
+            .fill(egui::Color32::from_rgb(18, 18, 24))
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 15),
+            ))
+            .rounding(10.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("🚀 Rendimiento Mejorado")
+                        .size(12.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(56, 189, 248)),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("• Ventana QUIC BDP: 64 MB ampliados\n• Pipeline I/O asíncrono y cifrado paralelo\n• Escritura diferida en disco (32 MB chunks)")
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+            });
     }
 
     fn render_toast(&mut self, ui: &mut egui::Ui) {

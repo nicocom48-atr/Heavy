@@ -158,7 +158,6 @@ impl PartFileManager {
         self.metadata.verified_bytes += data.len() as u64;
         self.metadata.last_chunk_hash = chunk_hash;
 
-        // Persist metadata
         let json = serde_json::to_vec(&self.metadata)?;
         tokio::fs::write(&self.meta_path, json)
             .await

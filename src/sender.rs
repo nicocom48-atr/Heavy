@@ -31,6 +31,7 @@ pub struct SenderConfig {
     pub signaling_server: Option<String>,
     pub shared_progress: Option<SharedProgress>,
     pub cancel_signal: Option<Arc<AtomicBool>>,
+    pub speed_limiter: Option<crate::speed_limiter::SpeedLimiter>,
 }
 
 pub async fn run_sender(config: SenderConfig) -> Result<()> {
@@ -269,42 +270,83 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         None
     };
 
-    let mut chunk_buf = vec![0u8; config.chunk_size as usize];
+    struct PreparedChunk {
+        offset: u64,
+        plaintext: Vec<u8>,
+        ciphertext: Vec<u8>,
+    }
+
     let mut current_offset = resume_offset;
-    let mut chunk_index = current_offset / (config.chunk_size as u64);
     let start_time = Instant::now();
     let mut last_speed_update = Instant::now();
     let mut bytes_since_last_update = 0u64;
 
-    while current_offset < file_size {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<PreparedChunk>>(2);
+    let read_cancel = cancel.clone();
+    let cipher_clone = cipher.clone();
+    let salt = *config.session.salt();
+    let chunk_size = config.chunk_size as u64;
+
+    let reader_handle = tokio::spawn(async move {
+        let mut offset = resume_offset;
+        let mut idx = offset / chunk_size;
+        let mut buf = vec![0u8; chunk_size as usize];
+
+        while offset < file_size {
+            if read_cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let to_read = std::cmp::min(chunk_size, file_size - offset) as usize;
+            if let Err(e) = file.read_exact(&mut buf[..to_read]).await {
+                let _ = tx.send(Err(e.into())).await;
+                return;
+            }
+            let ciphertext = match encrypt_chunk(&cipher_clone, &salt, idx, &buf[..to_read]) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            let chunk = PreparedChunk {
+                offset,
+                plaintext: buf[..to_read].to_vec(),
+                ciphertext,
+            };
+            if tx.send(Ok(chunk)).await.is_err() {
+                break;
+            }
+            offset += to_read as u64;
+            idx += 1;
+        }
+    });
+
+    while let Some(chunk_res) = rx.recv().await {
         if cancel.load(Ordering::Relaxed) {
+            reader_handle.abort();
             bail!("Transferencia cancelada por el usuario");
         }
 
-        let to_read = std::cmp::min(config.chunk_size as u64, file_size - current_offset) as usize;
-        file.read_exact(&mut chunk_buf[..to_read]).await?;
-
-        let ciphertext = encrypt_chunk(
-            &cipher,
-            config.session.salt(),
-            chunk_index,
-            &chunk_buf[..to_read],
-        )?;
+        let chunk = chunk_res?;
+        let bytes_len = chunk.plaintext.len();
 
         send_encrypted_chunk(
             &mut established.stream,
-            current_offset,
-            &chunk_buf[..to_read],
-            &ciphertext,
+            chunk.offset,
+            &chunk.plaintext,
+            &chunk.ciphertext,
         )
         .await?;
 
-        current_offset += to_read as u64;
-        chunk_index += 1;
-        bytes_since_last_update += to_read as u64;
+        if let Some(ref limiter) = config.speed_limiter {
+            limiter.consume(bytes_len).await;
+        }
+
+        current_offset += bytes_len as u64;
+        bytes_since_last_update += bytes_len as u64;
 
         if let Some(ref bar) = pb {
-            bar.inc(to_read as u64);
+            bar.inc(bytes_len as u64);
         }
 
         let now = Instant::now();
