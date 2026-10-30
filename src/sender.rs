@@ -80,12 +80,21 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
         p.role = TransferRole::Sender;
-        p.status = TransferStatus::Preparing;
         p.file_name = file_name.clone();
         p.total_bytes = file_size;
-        p.pairing_code = None;
         p.code_expires_in = Some(config.session.format_remaining());
-        p.status_text = "Calculando comprobación de integridad BLAKE3...".to_string();
+        if config.transport_mode == TransportMode::LegacyTcp {
+            p.status = TransferStatus::WaitingForPeer;
+            p.pairing_code = Some(code_formatted.clone());
+            p.status_text = format!(
+                "Servidor listo. Esperando al receptor con código {}...",
+                code_formatted
+            );
+        } else {
+            p.status = TransferStatus::Preparing;
+            p.pairing_code = None;
+            p.status_text = "Abriendo servidor temporal...".to_string();
+        }
     }
 
     println!(
@@ -100,7 +109,15 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         indicatif::HumanBytes(file_size),
         file_size as f64 / (1024.0 * 1024.0 * 1024.0)
     );
-    println!("  Estado  : Preparando el archivo antes de abrir el servidor temporal...");
+    if config.transport_mode == TransportMode::LegacyTcp {
+        println!("  Código  : {}", code_formatted.green().bold());
+        println!(
+            "  Estado  : Esperando que el receptor ingrese el código ({})",
+            config.session.format_remaining().yellow()
+        );
+    } else {
+        println!("  Estado  : Abriendo servidor temporal...");
+    }
     println!(
         "{}",
         "============================================================\n"
@@ -108,25 +125,19 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
             .cyan()
     );
 
-    // Calculate full file hash
-    let file_hash = if config.skip_prehash {
-        "UNVERIFIED_PREHASH".to_string()
-    } else {
-        compute_file_blake3_async(&config.file_path)
-            .await
-            .context("Failed to compute file BLAKE3 checksum")?
-    };
+    // Compute BLAKE3 in a concurrent task so the temporary server and pairing code become available immediately
+    let hash_file_path = config.file_path.clone();
+    let skip_prehash = config.skip_prehash;
+    let hash_task = tokio::spawn(async move {
+        if skip_prehash {
+            Ok("UNVERIFIED_PREHASH".to_string())
+        } else {
+            compute_file_blake3_async(&hash_file_path).await
+        }
+    });
 
     if config.transport_mode == TransportMode::LegacyTcp {
         config.session.start_waiting();
-    }
-    if let Some(ref sp) = config.shared_progress {
-        let mut p = sp.lock();
-        p.status_text = "Abriendo servidor temporal...".into();
-        if config.transport_mode == TransportMode::LegacyTcp {
-            p.status = TransferStatus::WaitingForPeer;
-            p.pairing_code = Some(code_formatted.clone());
-        }
     }
 
     let signal_client = SignalingClient::new(config.signaling_server);
@@ -134,20 +145,34 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     // Establish direct or relay connection
     let mut established = if config.transport_mode == TransportMode::LegacyTcp {
         println!("  Código LAN/manual: {code_formatted}");
-        establish_sender_connection(
+        match establish_sender_connection(
             &config.session,
             config.preferred_port,
             &signal_client,
             cancel.clone(),
         )
-        .await?
+        .await
+        {
+            Ok(est) => est,
+            Err(e) => {
+                hash_task.abort();
+                return Err(e);
+            }
+        }
     } else {
-        crate::automatic::listen_sender(
+        match crate::automatic::listen_sender(
             &config.session,
             config.transport_mode,
             config.shared_progress.clone(),
         )
-        .await?
+        .await
+        {
+            Ok(est) => est,
+            Err(e) => {
+                hash_task.abort();
+                return Err(e);
+            }
+        }
     };
 
     if let Some(ref sp) = config.shared_progress {
@@ -156,10 +181,16 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         p.connection_type = established.conn_type;
         p.peer_address = established.peer_description.clone();
         p.status_text = format!(
-            "Receptor conectado ({})! Iniciando autenticación mutua...",
+            "Receptor conectado ({})! Verificando archivo...",
             established.conn_type.label()
         );
     }
+
+    // Await hash completion before handshake
+    let file_hash = match hash_task.await {
+        Ok(res) => res.context("Failed to compute file BLAKE3 checksum")?,
+        Err(e) => bail!("Cálculo de hash BLAKE3 cancelado o fallido: {}", e),
+    };
 
     println!(
         "✓ Receptor conectado ({})! Realizando autenticación criptográfica...",

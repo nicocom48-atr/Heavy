@@ -1175,8 +1175,9 @@ impl HeavyDropApp {
         ui.add_space(4.0);
 
         // 3. Large Code Display Box with Integrated Copy Button
-        let has_session =
-            progress.pairing_code.is_some() && progress.status == TransferStatus::WaitingForPeer;
+        let has_session = progress.pairing_code.is_some()
+            && (progress.status == TransferStatus::WaitingForPeer
+                || progress.status == TransferStatus::Preparing);
         let code_border_stroke = if has_session {
             egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(56, 189, 248))
         } else {
@@ -1236,7 +1237,7 @@ impl HeavyDropApp {
                                         .size(11.5)
                                         .strong()
                                         .color(btn_color),
-                                )
+                                 )
                                 .fill(btn_fill)
                                 .stroke(egui::Stroke::new(
                                     1.0_f32,
@@ -1250,6 +1251,12 @@ impl HeavyDropApp {
                                 self.show_toast("¡Código copiado al portapapeles!");
                             }
                         });
+                    } else if is_send_busy {
+                        ui.label(
+                            egui::RichText::new("Generando código de conexión...")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(56, 189, 248)),
+                        );
                     } else {
                         ui.label(
                             egui::RichText::new("•••• - •••• - ••••")

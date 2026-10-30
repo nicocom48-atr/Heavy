@@ -23,9 +23,9 @@ pub const ALPN: &[u8] = b"heavydrop/4";
 
 pub fn high_throughput_transport_config() -> iroh::endpoint::QuicTransportConfig {
     iroh::endpoint::QuicTransportConfig::builder()
-        .stream_receive_window(iroh::endpoint::VarInt::from_u32(32 * 1024 * 1024))
-        .receive_window(iroh::endpoint::VarInt::from_u32(64 * 1024 * 1024))
-        .send_window(64 * 1024 * 1024)
+        .stream_receive_window(iroh::endpoint::VarInt::from_u32(512 * 1024))
+        .receive_window(iroh::endpoint::VarInt::from_u32(1024 * 1024))
+        .send_window(1024 * 1024)
         .build()
 }
 

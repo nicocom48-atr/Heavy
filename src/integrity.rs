@@ -12,7 +12,7 @@ pub async fn compute_file_blake3_async(path: &Path) -> Result<String> {
         .await
         .with_context(|| format!("Failed to open {}", path.display()))?;
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0; 1024 * 1024];
+    let mut buffer = vec![0; 4 * 1024 * 1024];
     loop {
         let count = file.read(&mut buffer).await?;
         if count == 0 {
