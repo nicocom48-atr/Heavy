@@ -5,6 +5,24 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+/// Yields between bounded reads so cancellation can interrupt huge-file hashing.
+pub async fn compute_file_blake3_async(path: &Path) -> Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 /// Fast BLAKE3 file hasher with visual progress bar for large files (e.g., 50GB).
 pub fn compute_file_blake3<P: AsRef<Path>>(path: P, show_progress: bool) -> Result<String> {
     let path = path.as_ref();

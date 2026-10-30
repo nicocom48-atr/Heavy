@@ -5,11 +5,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::connectivity::establish_receiver_connection;
 use crate::discovery::DiscoveryService;
-use crate::integrity::compute_file_blake3;
+use crate::integrity::compute_file_blake3_async;
 use crate::pairing::PairingCode;
 use crate::part_file::{PartFileManager, PrepareResult};
 use crate::protocol::{
@@ -79,9 +79,12 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
         .unwrap_or_else(|| Arc::new(DiscoveryService::new()));
 
     // Automatically resolve and connect to peer without needing IP or port
-    let mut established =
+    let mut established = if config.code.invitation().is_some() {
+        crate::automatic::connect_receiver(&config.code, config.shared_progress.clone()).await?
+    } else {
         establish_receiver_connection(&config.code, &signal_client, &discovery, cancel.clone())
-            .await?;
+            .await?
+    };
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
@@ -163,6 +166,7 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
                 message: Some("El archivo ya existe y su hash coincide perfectamente.".to_string()),
             };
             send_handshake_response(&mut established.stream, &resp).await?;
+            established.stream.close(true).await;
             if let Some(ref sp) = config.shared_progress {
                 let mut p = sp.lock();
                 p.status = TransferStatus::Completed;
@@ -261,6 +265,11 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
             );
         }
 
+        let expected_length =
+            (offer.file_size - current_offset).min(offer.chunk_size as u64) as usize;
+        if chunk_header.ciphertext_length as usize != expected_length + 16 {
+            bail!("Tamaño de bloque cifrado inválido");
+        }
         let mut ciphertext = vec![0u8; chunk_header.ciphertext_length as usize];
         tokio::time::timeout(
             CHUNK_TIMEOUT,
@@ -317,14 +326,25 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
         bar.finish_with_message("Descarga finalizada. Verificando integridad global...");
     }
 
-    let final_path = part_manager.finalize().await?;
+    let end = receive_chunk_header(&mut established.stream).await?;
+    if !end.is_end_of_stream() {
+        bail!("Falta el final de la transferencia");
+    }
+    part_manager.file.flush().await?;
 
     if offer.file_hash != "UNVERIFIED_PREHASH" {
-        let final_hash = compute_file_blake3(&final_path, false)?;
+        let final_hash = compute_file_blake3_async(&part_manager.part_path).await?;
         if !final_hash.eq_ignore_ascii_case(&offer.file_hash) {
             bail!("Integridad global fallida: el hash final no coincide");
         }
     }
+    let final_path = part_manager.finalize().await?;
+    established
+        .stream
+        .write_all(crate::protocol::COMPLETION_ACK)
+        .await?;
+    established.stream.flush().await?;
+    established.stream.close(true).await;
 
     let elapsed = start_time.elapsed().as_secs_f64();
     let downloaded_bytes = offer.file_size.saturating_sub(resume_offset);

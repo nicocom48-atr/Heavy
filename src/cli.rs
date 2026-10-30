@@ -17,6 +17,9 @@ pub struct Cli {
 pub enum Commands {
     /// Enviar un archivo generando un código temporal de conexión
     Send {
+        /// Modo anterior: código corto y descubrimiento TCP en la red local
+        #[arg(long)]
+        lan_only: bool,
         /// Ruta al archivo a transferir
         #[arg(value_name = "FILE")]
         file: PathBuf,

@@ -151,6 +151,11 @@ impl HeavyDropApp {
         self.send_error = None;
 
         let config = SenderConfig {
+            transport_mode: if self.signal_server().is_some() {
+                heavydrop::automatic::TransportMode::LegacyTcp
+            } else {
+                heavydrop::automatic::TransportMode::Automatic
+            },
             file_path,
             session,
             preferred_port: 7878,
@@ -510,7 +515,7 @@ impl eframe::App for HeavyDropApp {
         let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
         if let Some(file) = dropped_files.first() {
             if let Some(ref path) = file.path {
-                if path.is_file() {
+                if path.is_file() && !is_send_busy {
                     self.send_file_path = Some(path.clone());
                     self.send_session = None;
                     self.active_tab = ActiveTab::Send;
@@ -520,15 +525,18 @@ impl eframe::App for HeavyDropApp {
 
         egui::TopBottomPanel::bottom("internet_settings").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Servidor de Internet:");
-                ui.add_enabled(!is_send_busy && !is_recv_busy,
+                ui.label("Servidor manual (opcional):");
+                ui.add_enabled(
+                    !is_send_busy && !is_recv_busy,
                     egui::TextEdit::singleline(&mut self.signal_server_input)
-                        .hint_text("servidor:7880").desired_width(240.0));
+                        .hint_text("servidor:7880")
+                        .desired_width(240.0),
+                );
             });
             ui.small(if self.signal_server().is_some() {
                 "Ambos equipos deben usar el mismo servidor de señalización y relay."
             } else {
-                "Modo LAN: para conectar entre redes distintas, configura un servidor en ambos equipos."
+                "Conexión automática: crea una transferencia y comparte la invitación completa."
             });
         });
 
@@ -886,7 +894,8 @@ impl HeavyDropApp {
         ui.add_space(4.0);
 
         // 3. Large Code Display Box with Integrated Copy Button
-        let has_session = session_opt.is_some();
+        let has_session =
+            progress.pairing_code.is_some() && progress.status == TransferStatus::WaitingForPeer;
         let code_border_stroke = if has_session {
             egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(56, 189, 248))
         } else {
@@ -904,13 +913,19 @@ impl HeavyDropApp {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    if let Some(ref session) = session_opt {
+                    if let Some(ref invitation) =
+                        progress.pairing_code.as_ref().filter(|_| has_session)
+                    {
                         ui.label(
-                            egui::RichText::new(session.code().formatted())
-                                .size(19.0)
-                                .monospace()
-                                .strong()
-                                .color(egui::Color32::from_rgb(250, 250, 250)),
+                            egui::RichText::new(if invitation.starts_with("heavy1_") {
+                                "Invitación lista".to_string()
+                            } else {
+                                invitation.to_string()
+                            })
+                            .size(16.0)
+                            .monospace()
+                            .strong()
+                            .color(egui::Color32::from_rgb(250, 250, 250)),
                         );
 
                         // Integrated Copy Button to the right
@@ -950,7 +965,7 @@ impl HeavyDropApp {
                             );
 
                             if copy_btn.clicked() {
-                                ui.output_mut(|o| o.copied_text = session.code().formatted());
+                                ui.output_mut(|o| o.copied_text = invitation.to_string());
                                 self.show_toast("¡Código copiado al portapapeles!");
                             }
                         });
@@ -974,9 +989,15 @@ impl HeavyDropApp {
                 draw_clock_icon(ui, egui::Color32::from_rgb(148, 163, 184));
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(format!("Expira en {}", session.format_remaining()))
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                    egui::RichText::new(if has_session {
+                        format!("Expira en {}", session.format_remaining())
+                    } else if is_send_busy {
+                        "Preparando transferencia...".into()
+                    } else {
+                        "Servidor temporal cerrado".into()
+                    })
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
                 );
 
                 if !is_send_busy {
@@ -1104,14 +1125,12 @@ impl HeavyDropApp {
                 let edit = ui.add_sized(
                     [ui.available_width(), 26.0],
                     egui::TextEdit::singleline(&mut self.recv_code_input)
-                        .hint_text("XXXX-XXXX-XXXX")
+                        .hint_text("Pega la invitación completa (heavy1_…)")
                         .font(egui::TextStyle::Monospace)
-                        .char_limit(16)
+                        .char_limit(heavydrop::pairing::MAX_INVITATION_LEN)
                         .frame(false),
                 );
-                if edit.changed() {
-                    self.recv_code_input = self.recv_code_input.to_ascii_uppercase();
-                }
+                let _ = edit;
             });
 
         ui.add_space(10.0);

@@ -23,4 +23,9 @@ getrandom = "0.2"
 chacha20poly1305 = "0.11"
 x25519-dalek = { version = "3.0", features = ["static_secrets"] }
 socket2 = "0.6"
+iroh = "1.4.1"
+base64 = "0.22"
+
+[dev-dependencies]
+iroh-relay = { version = "1.4.1", features = ["server"] }
 

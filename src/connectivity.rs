@@ -13,8 +13,15 @@ use crate::session::Session;
 use crate::signaling::SignalingClient;
 use crate::transfer_state::ConnectionType;
 
-pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
+pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {
+    fn close(
+        &mut self,
+        _wait_for_peer: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+}
+impl AsyncStream for TcpStream {}
 
 pub struct EstablishedConnection {
     pub stream: Box<dyn AsyncStream>,
@@ -128,6 +135,9 @@ pub async fn establish_receiver_connection(
     discovery: &DiscoveryService,
     cancel_signal: Arc<AtomicBool>,
 ) -> Result<EstablishedConnection> {
+    if code.invitation().is_some() {
+        return crate::automatic::connect_receiver(code, None).await;
+    }
     // 1. Attempt LAN discovery first (up to 3 seconds)
     if let Some(lan_addr) = discovery.resolve_local(code, Duration::from_secs(3)).await {
         if let Ok(Ok(stream)) =

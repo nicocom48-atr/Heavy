@@ -1,13 +1,27 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Crockford Base32 alphabet omitting ambiguous characters (I, L, O, U)
 const BASE32_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const CODE_CHAR_LEN: usize = 12;
+pub const INVITATION_PREFIX: &str = "heavy1_";
+pub const MAX_INVITATION_LEN: usize = 8192;
+
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Invitation {
+    pub version: u32,
+    pub endpoint: iroh::EndpointAddr,
+    pub code: String,
+    pub expires_at: u64,
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PairingCode {
     raw: String, // 12 uppercase Base32 characters
+    invitation: Option<Invitation>,
 }
 
 impl PairingCode {
@@ -24,11 +38,40 @@ impl PairingCode {
             raw.push(BASE32_ALPHABET[idx] as char);
         }
 
-        Ok(Self { raw })
+        Ok(Self {
+            raw,
+            invitation: None,
+        })
     }
 
     /// Parse and normalize user input (tolerates hyphens, whitespace, lowercase, and common typos)
     pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.len() > MAX_INVITATION_LEN {
+            bail!("La invitación es demasiado larga");
+        }
+        if let Some(encoded) = trimmed.strip_prefix(INVITATION_PREFIX) {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(encoded)
+                .context("Invitación inválida: copia el token completo")?;
+            let invite: Invitation =
+                serde_json::from_slice(&bytes).context("Formato de invitación inválido")?;
+            if invite.version != crate::protocol::PROTOCOL_VERSION {
+                bail!("Versión de invitación incompatible. Actualiza HeavyDrop en ambos equipos");
+            }
+            if invite.expires_at <= unix_now()? {
+                bail!("La invitación expiró. Pide al emisor que cree otra transferencia");
+            }
+            if invite.endpoint.is_empty() || invite.endpoint.addrs.len() > 32 {
+                bail!("La invitación no contiene rutas de conexión válidas");
+            }
+            let mut parsed = Self::parse(&invite.code)?;
+            if parsed.invitation.is_some() {
+                bail!("Invitación anidada inválida");
+            }
+            parsed.invitation = Some(invite);
+            return Ok(parsed);
+        }
         let mut normalized = String::with_capacity(CODE_CHAR_LEN);
         for ch in input.chars() {
             match ch.to_ascii_uppercase() {
@@ -48,7 +91,30 @@ impl PairingCode {
             );
         }
 
-        Ok(Self { raw: normalized })
+        Ok(Self {
+            raw: normalized,
+            invitation: None,
+        })
+    }
+
+    pub fn invitation(&self) -> Option<&Invitation> {
+        self.invitation.as_ref()
+    }
+
+    pub fn with_invitation(
+        &self,
+        endpoint: iroh::EndpointAddr,
+        ttl: std::time::Duration,
+    ) -> Result<Self> {
+        Ok(Self {
+            raw: self.raw.clone(),
+            invitation: Some(Invitation {
+                version: crate::protocol::PROTOCOL_VERSION,
+                endpoint,
+                code: self.raw.clone(),
+                expires_at: unix_now()?.saturating_add(ttl.as_secs()).saturating_add(u64::from(ttl.subsec_nanos() > 0)),
+            }),
+        })
     }
 
     /// Return the raw normalized 12-character string
@@ -58,6 +124,14 @@ impl PairingCode {
 
     /// Return the user-facing formatted string (e.g., "KD7M-9Q2P-W8RX")
     pub fn formatted(&self) -> String {
+        if let Some(invite) = &self.invitation {
+            return format!(
+                "{}{}",
+                INVITATION_PREFIX,
+                URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(invite).expect("serializable invitation"))
+            );
+        }
         format!(
             "{}-{}-{}",
             &self.raw[0..4],
@@ -90,7 +164,7 @@ impl PairingCode {
         data.extend_from_slice(&self.derive_auth_key());
         data.extend_from_slice(session_salt);
         data.extend_from_slice(sender_pub);
-        *blake3::hash(&data).as_bytes()
+        blake3::derive_key("heavydrop-v4-sender-proof", &data)
     }
 
     /// Compute mutual authentication proof for receiver
@@ -103,7 +177,7 @@ impl PairingCode {
         data.extend_from_slice(&self.derive_auth_key());
         data.extend_from_slice(session_salt);
         data.extend_from_slice(receiver_pub);
-        *blake3::hash(&data).as_bytes()
+        blake3::derive_key("heavydrop-v4-receiver-proof", &data)
     }
 }
 
@@ -115,8 +189,14 @@ impl fmt::Display for PairingCode {
 
 impl fmt::Debug for PairingCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PairingCode({})", self.formatted())
+        write!(f, "PairingCode([redacted])")
     }
+}
+
+pub fn unix_now() -> Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs())
 }
 
 #[cfg(test)]

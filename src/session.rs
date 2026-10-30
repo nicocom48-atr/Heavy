@@ -12,7 +12,7 @@ pub struct Session {
     id: String,
     code: PairingCode,
     salt: [u8; 32],
-    created_at: Instant,
+    created_at: Arc<parking_lot::Mutex<Instant>>,
     ttl: Duration,
     consumed: Arc<AtomicBool>,
 }
@@ -31,10 +31,16 @@ impl Session {
             id,
             code,
             salt,
-            created_at: Instant::now(),
+            created_at: Arc::new(parking_lot::Mutex::new(Instant::now())),
             ttl: DEFAULT_SESSION_TTL,
             consumed: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn with_ttl(ttl: Duration) -> Result<Self> {
+        let mut session = Self::new()?;
+        session.ttl = ttl;
+        Ok(session)
     }
 
     /// Construct a receiver session from a user-entered code
@@ -49,7 +55,7 @@ impl Session {
             id,
             code,
             salt,
-            created_at: Instant::now(),
+            created_at: Arc::new(parking_lot::Mutex::new(Instant::now())),
             ttl: DEFAULT_SESSION_TTL,
             consumed: Arc::new(AtomicBool::new(false)),
         })
@@ -68,11 +74,11 @@ impl Session {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() >= self.ttl
+        self.created_at.lock().elapsed() >= self.ttl
     }
 
     pub fn remaining_time(&self) -> Duration {
-        let elapsed = self.created_at.elapsed();
+        let elapsed = self.created_at.lock().elapsed();
         if elapsed >= self.ttl {
             Duration::ZERO
         } else {
@@ -98,6 +104,11 @@ impl Session {
 
     pub fn is_consumed(&self) -> bool {
         self.consumed.load(Ordering::SeqCst)
+    }
+
+    /// Start the invitation lifetime only when the file and listener are ready.
+    pub fn start_waiting(&self) {
+        *self.created_at.lock() = Instant::now();
     }
 }
 

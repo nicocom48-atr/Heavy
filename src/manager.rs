@@ -12,6 +12,7 @@ use crate::transfer_state::{
 pub struct TransferManager {
     progress: SharedProgress,
     cancel_signal: Arc<AtomicBool>,
+    active: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TransferManager {
@@ -19,6 +20,7 @@ impl TransferManager {
         Self {
             progress: new_shared_progress(),
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -26,6 +28,7 @@ impl TransferManager {
         Self {
             progress,
             cancel_signal: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -38,6 +41,7 @@ impl TransferManager {
     }
 
     pub fn is_busy(&self) -> bool {
+        if self.active.try_lock().is_err() { return true; }
         let p = self.progress.lock();
         matches!(
             p.status,
@@ -53,8 +57,7 @@ impl TransferManager {
     pub fn cancel(&self) {
         self.cancel_signal.store(true, Ordering::Relaxed);
         let mut p = self.progress.lock();
-        p.status = TransferStatus::Cancelled;
-        p.status_text = "Transferencia cancelada por el usuario.".to_string();
+        p.status_text = "Cancelando transferencia y cerrando servidor temporal...".to_string();
         p.bytes_per_sec = 0.0;
     }
 
@@ -63,6 +66,7 @@ impl TransferManager {
     }
 
     pub async fn run_send(&self, mut config: SenderConfig) -> Result<()> {
+        let _active = self.active.try_lock().map_err(|_| anyhow::anyhow!("Ya hay una transferencia en curso"))?;
         self.reset_cancel();
         self.start(TransferRole::Sender);
         config.shared_progress = Some(self.progress.clone());
@@ -73,6 +77,7 @@ impl TransferManager {
     }
 
     pub async fn run_recv(&self, mut config: ReceiverConfig) -> Result<()> {
+        let _active = self.active.try_lock().map_err(|_| anyhow::anyhow!("Ya hay una transferencia en curso"))?;
         self.reset_cancel();
         self.start(TransferRole::Receiver);
         config.shared_progress = Some(self.progress.clone());

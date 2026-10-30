@@ -294,6 +294,7 @@ async fn test_full_end_to_end_transfer_using_code_only() {
     let sender_handle = tokio::spawn(async move {
         manager_sender
             .run_send(SenderConfig {
+                transport_mode: heavydrop::automatic::TransportMode::LegacyTcp,
                 file_path: send_path,
                 session: send_session,
                 preferred_port: 51521,
@@ -356,6 +357,7 @@ async fn test_empty_file_transfer_using_code() {
     let sender_task = tokio::spawn(async move {
         manager_sender
             .run_send(SenderConfig {
+                transport_mode: heavydrop::automatic::TransportMode::LegacyTcp,
                 file_path: send_file,
                 session: send_session,
                 preferred_port: 51522,
@@ -414,6 +416,7 @@ async fn test_wrong_code_mutual_authentication_failure() {
     let sender_task = tokio::spawn(async move {
         manager_sender
             .run_send(SenderConfig {
+                transport_mode: heavydrop::automatic::TransportMode::LegacyTcp,
                 file_path: send_file,
                 session: send_session,
                 preferred_port: 51523,
@@ -482,6 +485,7 @@ async fn test_cooperative_cancellation_during_transfer() {
     let sender_task = tokio::spawn(async move {
         manager_sender
             .run_send(SenderConfig {
+                transport_mode: heavydrop::automatic::TransportMode::LegacyTcp,
                 file_path: send_file,
                 session: send_session,
                 preferred_port: 51524,

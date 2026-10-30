@@ -9,8 +9,9 @@ use std::time::Instant;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+use crate::automatic::TransportMode;
 use crate::connectivity::establish_sender_connection;
-use crate::integrity::compute_file_blake3;
+use crate::integrity::compute_file_blake3_async;
 use crate::protocol::{
     derive_session_cipher, encrypt_chunk, generate_keypair, send_encrypted_chunk,
     send_end_of_stream, send_handshake_offer, verify_proof_constant_time, HandshakeOffer,
@@ -21,6 +22,7 @@ use crate::signaling::SignalingClient;
 use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
 
 pub struct SenderConfig {
+    pub transport_mode: TransportMode,
     pub file_path: PathBuf,
     pub session: Session,
     pub preferred_port: u16,
@@ -80,7 +82,7 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         p.status = TransferStatus::Preparing;
         p.file_name = file_name.clone();
         p.total_bytes = file_size;
-        p.pairing_code = Some(code_formatted.clone());
+        p.pairing_code = None;
         p.code_expires_in = Some(config.session.format_remaining());
         p.status_text = "Calculando comprobación de integridad BLAKE3...".to_string();
     }
@@ -97,11 +99,7 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         indicatif::HumanBytes(file_size),
         file_size as f64 / (1024.0 * 1024.0 * 1024.0)
     );
-    println!("  Código  : {}", code_formatted.green().bold());
-    println!(
-        "  Estado  : Esperando que el receptor ingrese el código ({})",
-        config.session.format_remaining().yellow()
-    );
+    println!("  Estado  : Preparando el archivo antes de abrir el servidor temporal...");
     println!(
         "{}",
         "============================================================\n"
@@ -113,29 +111,43 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     let file_hash = if config.skip_prehash {
         "UNVERIFIED_PREHASH".to_string()
     } else {
-        compute_file_blake3(&config.file_path, config.shared_progress.is_none())
+        compute_file_blake3_async(&config.file_path)
+            .await
             .context("Failed to compute file BLAKE3 checksum")?
     };
 
+    if config.transport_mode == TransportMode::LegacyTcp {
+        config.session.start_waiting();
+    }
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
-        p.status = TransferStatus::WaitingForPeer;
-        p.status_text = format!(
-            "Esperando conexión del receptor con código {}...",
-            code_formatted
-        );
+        p.status_text = "Abriendo servidor temporal...".into();
+        if config.transport_mode == TransportMode::LegacyTcp {
+            p.status = TransferStatus::WaitingForPeer;
+            p.pairing_code = Some(code_formatted.clone());
+        }
     }
 
     let signal_client = SignalingClient::new(config.signaling_server);
 
     // Establish direct or relay connection
-    let mut established = establish_sender_connection(
-        &config.session,
-        config.preferred_port,
-        &signal_client,
-        cancel.clone(),
-    )
-    .await?;
+    let mut established = if config.transport_mode == TransportMode::LegacyTcp {
+        println!("  Código LAN/manual: {code_formatted}");
+        establish_sender_connection(
+            &config.session,
+            config.preferred_port,
+            &signal_client,
+            cancel.clone(),
+        )
+        .await?
+    } else {
+        crate::automatic::listen_sender(
+            &config.session,
+            config.transport_mode,
+            config.shared_progress.clone(),
+        )
+        .await?
+    };
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
@@ -196,7 +208,7 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     }
 
     // Invalidate/consume code so it cannot be reused
-    let _ = config.session.consume();
+    config.session.consume()?;
 
     if !response.accepted {
         let msg = response
@@ -208,6 +220,7 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
             p.status_text = msg.clone();
         }
         println!("ℹ {}", msg.yellow());
+        established.stream.close(false).await;
         return Ok(());
     }
 
@@ -315,6 +328,17 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     }
 
     send_end_of_stream(&mut established.stream).await?;
+    let mut ack = [0; 8];
+    tokio::time::timeout(
+        crate::protocol::CHUNK_TIMEOUT,
+        established.stream.read_exact(&mut ack),
+    )
+    .await
+    .context("El receptor no confirmó la verificación del archivo a tiempo")??;
+    if &ack != crate::protocol::COMPLETION_ACK {
+        bail!("El receptor no confirmó la recepción íntegra del archivo");
+    }
+    established.stream.close(false).await;
 
     if let Some(ref bar) = pb {
         bar.finish_with_message("Transferencia completada con éxito!");

@@ -97,6 +97,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
 
     let result = match cmd {
         cli::Commands::Send {
+            lan_only,
             file,
             no_prehash,
             port,
@@ -110,13 +111,23 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
                 }
             };
 
+            let configured_server = if lan_only {
+                None
+            } else {
+                signal_server.or_else(SignalingClient::default_server)
+            };
             let config = sender::SenderConfig {
+                transport_mode: if lan_only || configured_server.is_some() {
+                    heavydrop::automatic::TransportMode::LegacyTcp
+                } else {
+                    heavydrop::automatic::TransportMode::Automatic
+                },
                 file_path: file,
                 session,
                 preferred_port: port,
                 chunk_size: 4 * 1024 * 1024,
                 skip_prehash: no_prehash,
-                signaling_server: signal_server.or_else(SignalingClient::default_server),
+                signaling_server: configured_server,
                 shared_progress: None,
                 cancel_signal: None,
             };

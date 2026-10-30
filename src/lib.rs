@@ -1,3 +1,4 @@
+pub mod automatic;
 pub mod connectivity;
 pub mod discovery;
 pub mod integrity;

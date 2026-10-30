@@ -8,8 +8,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-pub const PROTOCOL_VERSION: u32 = 3;
-pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP03";
+pub const PROTOCOL_VERSION: u32 = 4;
+pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP04";
+pub const COMPLETION_ACK: &[u8; 8] = b"HVDONE04";
 pub const MIN_CHUNK_SIZE: u32 = 64 * 1024; // 64 KB
 pub const MAX_CHUNK_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
 pub const DEFAULT_CHUNK_SIZE: u32 = 4 * 1024 * 1024; // 4 MB chunk size for high-throughput 50GB transfers
@@ -207,7 +208,7 @@ pub async fn receive_handshake_offer<R: AsyncReadExt + Unpin>(
             .context("Failed to read magic bytes")?;
 
         if &magic != MAGIC_BYTES {
-            bail!("Protocol mismatch: incompatible peer magic bytes. Make sure both peers run HeavyDrop v3.");
+            bail!("Protocolo incompatible. Actualiza HeavyDrop en ambos equipos.");
         }
 
         let len = reader
