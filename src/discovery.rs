@@ -32,7 +32,7 @@ pub fn spawn_blind_beacon(
     blind_ticket: [u8; 32],
     listen_port: u16,
     cancel_signal: Arc<AtomicBool>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let socket = match UdpSocket::bind("0.0.0.0:0").await {
             Ok(s) => s,
@@ -76,7 +76,7 @@ pub fn spawn_blind_beacon(
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-    });
+    })
 }
 
 fn bind_reuse_udp(port: u16) -> Result<UdpSocket, Box<dyn std::error::Error + Send + Sync>> {

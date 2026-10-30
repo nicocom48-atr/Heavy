@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::receiver::{run_receiver, ReceiverConfig};
 use crate::sender::{run_sender, SenderConfig};
-use crate::transfer_state::{new_shared_progress, SharedProgress, TransferStatus};
+use crate::transfer_state::{
+    new_shared_progress, SharedProgress, TransferProgress, TransferRole, TransferStatus,
+};
 
 #[derive(Clone)]
 pub struct TransferManager {
@@ -62,16 +64,59 @@ impl TransferManager {
 
     pub async fn run_send(&self, mut config: SenderConfig) -> Result<()> {
         self.reset_cancel();
+        self.start(TransferRole::Sender);
         config.shared_progress = Some(self.progress.clone());
         config.cancel_signal = Some(self.cancel_signal.clone());
-        run_sender(config).await
+        let result = self.until_cancelled(run_sender(config)).await;
+        self.finish(&result);
+        result
     }
 
     pub async fn run_recv(&self, mut config: ReceiverConfig) -> Result<()> {
         self.reset_cancel();
+        self.start(TransferRole::Receiver);
         config.shared_progress = Some(self.progress.clone());
         config.cancel_signal = Some(self.cancel_signal.clone());
-        run_receiver(config).await
+        let result = self.until_cancelled(run_receiver(config)).await;
+        self.finish(&result);
+        result
+    }
+
+    fn start(&self, role: TransferRole) {
+        *self.progress.lock() = TransferProgress {
+            role,
+            status: TransferStatus::Preparing,
+            ..TransferProgress::default()
+        };
+    }
+
+    async fn until_cancelled(
+        &self,
+        transfer: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<()> {
+        tokio::select! {
+            result = transfer => result,
+            _ = async {
+                while !self.cancel_signal.load(Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            } => anyhow::bail!("Transferencia cancelada por el usuario"),
+        }
+    }
+
+    fn finish(&self, result: &Result<()>) {
+        if let Err(error) = result {
+            let mut p = self.progress.lock();
+            p.bytes_per_sec = 0.0;
+            if self.cancel_signal.load(Ordering::Relaxed) {
+                p.status = TransferStatus::Cancelled;
+                p.status_text = "Transferencia cancelada por el usuario".to_string();
+            } else {
+                p.status = TransferStatus::Failed;
+                p.status_text = "La transferencia falló".to_string();
+                p.error = Some(format!("{error:#}"));
+            }
+        }
     }
 }
 
