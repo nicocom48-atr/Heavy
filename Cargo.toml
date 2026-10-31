@@ -3,7 +3,7 @@ name = "heavydrop"
 version = "0.2.6"
 edition = "2021"
 authors = ["heavydrop contributors"]
-description = "High-performance P2P file transfer tool optimized for huge files (50GB+) with resume, AEAD encryption, and BLAKE3 verification"
+description = "High-performance P2P file transfer tool (GUI & CLI) for massive files (50GB-1TB+) over QUIC with ChaCha20-Poly1305 AEAD, BLAKE3 verification, and instant pairing codes"
 
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }

@@ -44,7 +44,7 @@ Local en ms          P2P por Internet       100% Cifrado E2E (Dumb Pipe)
 ```
 
 1. **Conexión Directa Local (LAN):** Detección instantánea en la misma red local mediante baliza UDP con ticket ciego. No requiere acceso a Internet ni expone datos a otros equipos de la red Wi-Fi.
-2. **Conexión Directa por Internet (P2P):** Intercambio de candidatos de red a través de un servidor ligero de señalización (*rendezvous*).
+2. **Conexión Directa por Internet (P2P QUIC):** Negociación automática con perforación de NAT (*hole punching*) y transporte QUIC de alto rendimiento mediante el motor de red Iroh (ALPN `heavydrop/4`), o candidatos TCP vía señalización ligera.
 3. **Fallback mediante Relay Cifrado:** Si ambos equipos se encuentran detrás de firewalls restrictivos o CGNAT simétrico, la transferencia se canaliza a través del servidor como un túnel ciego. **Todo el contenido viaja cifrado de extremo a extremo con ChaCha20-Poly1305**, de modo que el relay jamás tiene acceso a las claves ni al contenido del archivo.
 
 ---
@@ -72,13 +72,16 @@ Local en ms          P2P por Internet       100% Cifrado E2E (Dumb Pipe)
 
 ---
 
-## 🖥️ Interfaz Gráfica Nativa (GUI)
+## 🖥️ Interfaz Gráfica Nativa (GUI) y Web
 
-Al abrir `heavydrop.exe` sin argumentos (o haciendo doble clic), se inicia la aplicación de escritorio simplificada:
+Al abrir `heavydrop.exe` sin argumentos (o haciendo doble clic), se inicia la aplicación de escritorio nativa (desarrollada con `egui`/`eframe` y estilo Fluent/Cyber):
 
-- 📤 **Enviar:** Arrastra cualquier archivo, pulsa "Crear transferencia", copia el código con 1 clic y observa la cuenta regresiva.
-- 📥 **Recibir:** Ingresa el código recibido, selecciona la carpeta de destino y descarga con un solo clic.
-- 📊 **Monitor:** Velocidad en tiempo real (MB/s), bytes transferidos, porcentaje, tiempo restante (ETA) y etiqueta de conectividad (*Directa LAN*, *Directa Internet* o *Relay*).
+- 📤 **Enviar (Hero Dropzone):** Arrastra y suelta cualquier archivo (hasta 1 TB+), pulsa "Crear transferencia", copia el código temporal de 12 caracteres con 1 clic y observa la cuenta regresiva en vivo.
+- 📥 **Recibir:** Ingresa el código recibido, selecciona la carpeta de destino con **comprobación en tiempo real del espacio en disco disponible** y descarga con un solo clic.
+- 📜 **Historial Persistente:** Pestaña dedicada con el registro histórico de transferencias (fecha y hora, archivo, tamaño, rol emisor/receptor, estado, velocidad promedio y acceso directo al explorador de archivos).
+- 🎛️ **Límites de Velocidad (Speed Limiter):** Panel lateral retráctil para limitar la tasa de transferencia tanto de subida como de bajada (en MB/s o sin límite) en caliente sin interrumpir la sesión.
+- 📊 **Telemetría y Gráfica en Tiempo Real:** Monitor dinámico con gráfica de velocidad en tiempo real, medición de velocidad pico (MB/s), bytes transferidos, porcentaje completado, tiempo restante estimado (ETA) y tipo de conexión establecida.
+- 🌐 **Vista Previa Web Interactiva:** Incluye `index.html`, una interfaz web de diseño *cyber-dark* interactiva construida con Tailwind CSS y Lucide Icons para exploración visual.
 
 ---
 
