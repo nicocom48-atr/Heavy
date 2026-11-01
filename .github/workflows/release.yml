@@ -40,7 +40,7 @@ jobs:
       - name: Prepare release version
         id: version
         shell: pwsh
-        run: ./.github/scripts/prepare-release.ps1
+        run: pwsh -ExecutionPolicy Bypass -File ./.github/scripts/prepare-release.ps1
 
       - name: Setup Rust toolchain
         if: steps.version.outputs.release_exists != 'true'
@@ -57,7 +57,7 @@ jobs:
       - name: Test release automation
         if: steps.version.outputs.release_exists != 'true'
         shell: pwsh
-        run: ./tests/release_workflow_tests.ps1
+        run: pwsh -ExecutionPolicy Bypass -File ./tests/release_workflow_tests.ps1
 
       - name: Test application
         if: steps.version.outputs.release_exists != 'true'

@@ -1,6 +1,11 @@
 param([string]$RepositoryRoot = (Join-Path $PSScriptRoot '../..'))
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+trap {
+    $err = "prepare-release.ps1 error: $_ (line $($_.InvocationInfo.ScriptLineNumber))"
+    Write-Output "::error::$err"
+    throw
+}
 Push-Location -LiteralPath $RepositoryRoot
 try {
     $gitCmd = (Get-Command -CommandType Application git).Source
