@@ -1,15 +1,18 @@
 param([string]$RepositoryRoot = (Join-Path $PSScriptRoot '../..'))
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
 Push-Location -LiteralPath $RepositoryRoot
 try {
     $gitCmd = (Get-Command -CommandType Application git).Source
     function Invoke-Git([string[]]$Arguments) {
         $result = & $gitCmd @Arguments
-        if ($LASTEXITCODE -ne 0) { throw "Git failed: $($Arguments[0])" }
+        if ($LASTEXITCODE -ne 0) { throw "Git failed: $($Arguments -join ' ')" }
         return $result
     }
     $sourceSha = (Invoke-Git @('rev-parse', 'HEAD')).Trim()
     $automatic = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main'
+    Write-Output "Preparing release for commit $sourceSha (automatic=$automatic)"
+
     $tags = @(Invoke-Git @('tag', '--list', 'v*')) | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
     if ($automatic) {
         foreach ($existing in $tags) {
@@ -54,10 +57,10 @@ try {
         Invoke-Git @('config', 'user.name', 'github-actions[bot]') | Out-Null
         Invoke-Git @('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com') | Out-Null
         Invoke-Git @('add', '--', 'Cargo.toml', 'Cargo.lock') | Out-Null
-        & $gitCmd diff --cached --quiet
-        if ($LASTEXITCODE -eq 1) {
+        $changes = (Invoke-Git @('diff', '--cached', '--name-only')).Trim()
+        if ($changes) {
             Invoke-Git @('commit', '-m', "Release $tag", '-m', "Release-Source: $sourceSha") | Out-Null
-        } elseif ($LASTEXITCODE -ne 0) { throw 'Cannot inspect staged version changes' }
+        }
         Invoke-Git @('tag', '-a', $tag, '-m', "HeavyDrop $tag") | Out-Null
     }
     # Only the release tag is pushed after tests/build succeed. main is never modified by the bot.

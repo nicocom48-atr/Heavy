@@ -1,5 +1,6 @@
 param()
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
 
 Write-Host "==> Testing HeavyDrop Release Automation" -ForegroundColor Cyan
 
