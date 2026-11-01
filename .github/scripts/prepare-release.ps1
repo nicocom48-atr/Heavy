@@ -2,20 +2,22 @@ param([string]$RepositoryRoot = (Join-Path $PSScriptRoot '../..'))
 $ErrorActionPreference = 'Stop'
 Push-Location -LiteralPath $RepositoryRoot
 try {
-    function Git([string[]]$Arguments) {
-        $result = & git @Arguments
+    $gitCmd = (Get-Command -CommandType Application git).Source
+    function Invoke-Git([string[]]$Arguments) {
+        $result = & $gitCmd @Arguments
         if ($LASTEXITCODE -ne 0) { throw "Git failed: $($Arguments[0])" }
         return $result
     }
-    $sourceSha = (Git @('rev-parse', 'HEAD')).Trim()
+    $sourceSha = (Invoke-Git @('rev-parse', 'HEAD')).Trim()
     $automatic = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main'
-    $tags = @(Git @('tag', '--list', 'v*')) | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
+    $tags = @(Invoke-Git @('tag', '--list', 'v*')) | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
     if ($automatic) {
         foreach ($existing in $tags) {
-            $message = (Git @('log', '-1', '--format=%B', $existing)) -join "`n"
-            if ($message -match "(?m)^Release-Source: $sourceSha$") {
-                "release_exists=true" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
-                "RELEASE_TAG=$existing" | Add-Content -LiteralPath $env:GITHUB_ENV
+            $message = (Invoke-Git @('log', '-1', '--format=%B', $existing)) -join "`n"
+            $tagSha = (Invoke-Git @('rev-parse', "$existing^{commit}")).Trim()
+            if ($message -match "(?m)^Release-Source: $sourceSha$" -or $tagSha -eq $sourceSha) {
+                if ($env:GITHUB_OUTPUT) { "release_exists=true" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
+                if ($env:GITHUB_ENV) { "RELEASE_TAG=$existing" | Add-Content -LiteralPath $env:GITHUB_ENV }
                 Write-Output "Release already prepared for $sourceSha : $existing"
                 return
             }
@@ -38,7 +40,7 @@ try {
     }
     if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Expected a release tag in vMAJOR.MINOR.PATCH format' }
     if ($tags -contains $tag) {
-        $tagSha = (Git @('rev-parse', "$tag^{commit}")).Trim()
+        $tagSha = (Invoke-Git @('rev-parse', "$tag^{commit}")).Trim()
         if ($tagSha -ne $sourceSha) { throw 'Existing tag points to a different commit; refusing to replace it' }
     } else {
         $version = $tag.Substring(1)
@@ -49,17 +51,17 @@ try {
         $lock = [regex]::Replace($lock, $lockPattern, { param($m) $m.Groups[1].Value + $version + $m.Groups[3].Value })
         [System.IO.File]::WriteAllText($manifestPath, $manifest)
         [System.IO.File]::WriteAllText($lockPath, $lock)
-        Git @('config', 'user.name', 'github-actions[bot]') | Out-Null
-        Git @('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com') | Out-Null
-        Git @('add', '--', 'Cargo.toml', 'Cargo.lock') | Out-Null
-        & git diff --cached --quiet
+        Invoke-Git @('config', 'user.name', 'github-actions[bot]') | Out-Null
+        Invoke-Git @('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com') | Out-Null
+        Invoke-Git @('add', '--', 'Cargo.toml', 'Cargo.lock') | Out-Null
+        & $gitCmd diff --cached --quiet
         if ($LASTEXITCODE -eq 1) {
-            Git @('commit', '-m', "Release $tag", '-m', "Release-Source: $sourceSha") | Out-Null
+            Invoke-Git @('commit', '-m', "Release $tag", '-m', "Release-Source: $sourceSha") | Out-Null
         } elseif ($LASTEXITCODE -ne 0) { throw 'Cannot inspect staged version changes' }
-        Git @('tag', '-a', $tag, '-m', "HeavyDrop $tag") | Out-Null
+        Invoke-Git @('tag', '-a', $tag, '-m', "HeavyDrop $tag") | Out-Null
     }
     # Only the release tag is pushed after tests/build succeed. main is never modified by the bot.
-    "RELEASE_TAG=$tag" | Add-Content -LiteralPath $env:GITHUB_ENV
-    "release_exists=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+    if ($env:GITHUB_ENV) { "RELEASE_TAG=$tag" | Add-Content -LiteralPath $env:GITHUB_ENV }
+    if ($env:GITHUB_OUTPUT) { "release_exists=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
     Write-Output "Prepared $tag from $sourceSha"
 } finally { Pop-Location }

@@ -193,8 +193,8 @@ pub async fn connect_receiver_with_policy(
 }
 
 fn connection_type(connection: &Connection) -> ConnectionType {
-    for path in connection.paths().iter().filter(|p| p.is_selected()) {
-        return if path.is_relay() {
+    if let Some(path) = connection.paths().iter().find(|p| p.is_selected()) {
+        if path.is_relay() {
             ConnectionType::Relay
         } else {
             match path.remote_addr() {
@@ -207,9 +207,10 @@ fn connection_type(connection: &Connection) -> ConnectionType {
                 }
                 _ => ConnectionType::DirectInternet,
             }
-        };
+        }
+    } else {
+        ConnectionType::None
     }
-    ConnectionType::None
 }
 
 fn established(
