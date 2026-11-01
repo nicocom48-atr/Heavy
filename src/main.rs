@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod cli;
 mod gui;
@@ -27,15 +27,17 @@ fn attach_console() {
 }
 
 fn main() -> ExitCode {
+    // Attach before clap parses flags so --help and argument errors remain visible.
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).is_some_and(|arg| arg != "gui") {
+        attach_console();
+    }
     let args = cli::Cli::parse();
 
     // If no subcommand was passed or user explicitly chose `gui`, launch the native window GUI
     match args.command {
         None | Some(cli::Commands::Gui) => launch_gui(),
         Some(cmd) => {
-            #[cfg(target_os = "windows")]
-            attach_console();
-
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -59,7 +61,7 @@ fn launch_gui() -> ExitCode {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 640.0])
+            .with_inner_size([1280.0, 1040.0])
             .with_min_inner_size([680.0, 480.0])
             .with_title("HeavyDrop — P2P File Transfer"),
         ..Default::default()

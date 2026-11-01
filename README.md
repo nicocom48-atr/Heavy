@@ -74,13 +74,13 @@ Local en ms          P2P por Internet       100% Cifrado E2E (Dumb Pipe)
 
 ## 🖥️ Interfaz Gráfica Nativa (GUI) y Web
 
-Al abrir `heavydrop.exe` sin argumentos (o haciendo doble clic), se inicia la aplicación de escritorio nativa (desarrollada con `egui`/`eframe` y estilo Fluent/Cyber):
+Al abrir `heavydrop.exe` sin argumentos (o haciendo doble clic), se inicia la aplicación de escritorio nativa sin una consola adicional, también en compilaciones de desarrollo. La interfaz, desarrollada con `egui`/`eframe`, utiliza el diseño **Noche / Cian**, con campos suaves y acciones secundarias sin contornos. Enviar y recibir aparecen en dos columnas en ventanas amplias o apilados con desplazamiento en ventanas pequeñas. Historial, velocidad y ajustes se integran debajo, sin pestañas ni ventanas adicionales.
 
 - 📤 **Enviar (Hero Dropzone):** Arrastra y suelta cualquier archivo (hasta 1 TB+), pulsa "Crear transferencia", copia el código temporal de 12 caracteres con 1 clic y observa la cuenta regresiva en vivo.
 - 📥 **Recibir:** Ingresa el código recibido, selecciona la carpeta de destino con **comprobación en tiempo real del espacio en disco disponible** y descarga con un solo clic.
-- 📜 **Historial Persistente:** Pestaña dedicada con el registro histórico de transferencias (fecha y hora, archivo, tamaño, rol emisor/receptor, estado, velocidad promedio y acceso directo al explorador de archivos).
-- 🎛️ **Límites de Velocidad (Speed Limiter):** Panel lateral retráctil para limitar la tasa de transferencia tanto de subida como de bajada (en MB/s o sin límite) en caliente sin interrumpir la sesión.
-- 📊 **Telemetría y Gráfica en Tiempo Real:** Monitor dinámico con gráfica de velocidad en tiempo real, medición de velocidad pico (MB/s), bytes transferidos, porcentaje completado, tiempo restante estimado (ETA) y tipo de conexión establecida.
+- 📜 **Historial Persistente:** Panel integrado con las últimas transferencias y una acción **Ver todo** para consultar el registro completo (fecha y hora en UTC, archivo, tamaño, rol emisor/receptor, estado, velocidad promedio y acceso directo al explorador de archivos).
+- 🎛️ **Límites de Velocidad (Speed Limiter):** Panel integrado para limitar la subida y la bajada en caliente con deslizadores (en MB/s; 0 significa sin límite), sin interrumpir la sesión.
+- 📊 **Telemetría y Gráfica en Tiempo Real:** Monitor dinámico con gráfica de velocidad en tiempo real, medición de velocidad pico (MB/s), bytes transferidos, porcentaje completado, tiempo restante estimado (ETA) y tipo de conexión establecida. Envío y recepción mantienen métricas independientes.
 - 🌐 **Vista Previa Web Interactiva:** Incluye `index.html`, una interfaz web de diseño *cyber-dark* interactiva construida con Tailwind CSS y Lucide Icons para exploración visual.
 
 ---
