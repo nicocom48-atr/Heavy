@@ -30,7 +30,7 @@ fn test_pairing_code_entropy_and_uniqueness() {
         assert_eq!(code.raw().len(), 12);
         let formatted = code.formatted();
         assert_eq!(formatted.len(), 14);
-        assert!(!seen.contains(&code.raw().to_string()));
+        assert!(!seen.contains(code.raw()));
         seen.insert(code.raw().to_string());
     }
 }

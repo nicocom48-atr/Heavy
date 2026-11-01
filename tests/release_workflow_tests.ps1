@@ -45,6 +45,10 @@ Write-Host "    Next automated tag from tags ($($testTags -join ', ')): $expecte
 Write-Host "--> Testing prepare-release.ps1 in isolated mock repository..."
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("heavydrop_release_test_" + [System.Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+$savedEnvironment = @{}
+foreach ($key in @('GITHUB_OUTPUT', 'GITHUB_ENV', 'GITHUB_EVENT_NAME', 'GITHUB_REF', 'GITHUB_REF_TYPE', 'INPUT_TAG')) {
+    $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+}
 
 try {
     $gitCmd = (@(Get-Command -CommandType Application git)[0]).Source
@@ -115,9 +119,14 @@ try {
     Clear-Content -LiteralPath $envFile
     & $PrepareScript -RepositoryRoot $tempDir
     $secondOut = Get-Content -Raw -LiteralPath $outputFile
-    if ($secondOut -notmatch 'release_exists=true') {
-        throw "Expected idempotent release_exists=true on source commit, got: $secondOut"
+    if ($secondOut -notmatch 'release_exists=false') {
+        throw "A source-commit retry must rebuild and publish its existing version: $secondOut"
     }
+    if ((Run-Git @('tag', '--list', 'v*')).Count -ne 2) { throw 'Retry created an extra release tag' }
+    if ((Run-Git @('rev-parse', 'HEAD')).Trim() -ne (Run-Git @('rev-parse', 'v0.2.7^{commit}')).Trim()) {
+        throw 'Retry did not check out the prepared release commit'
+    }
+    if ((Get-Content -Raw -LiteralPath $envFile) -notmatch 'RELEASE_TAG=v0\.2\.7') { throw 'Retry changed the release version' }
 
     # Third run: test on tagged commit directly
     Run-Git @('checkout', 'v0.2.7') | Out-Null
@@ -125,17 +134,46 @@ try {
     Clear-Content -LiteralPath $envFile
     & $PrepareScript -RepositoryRoot $tempDir
     $thirdOut = Get-Content -Raw -LiteralPath $outputFile
-    if ($thirdOut -notmatch 'release_exists=true') {
-        throw "Expected idempotent release_exists=true on tagged commit, got: $thirdOut"
+    if ($thirdOut -notmatch 'release_exists=false') {
+        throw "A tagged-commit retry must rebuild and publish its existing version: $thirdOut"
     }
-    Write-Host "    Mock repo automatic bump and idempotency passed!"
+    # A different merge must receive the next version rather than reusing the previous one.
+    Run-Git @('commit', '--allow-empty', '-m', 'Next feature') | Out-Null
+    Clear-Content -LiteralPath $outputFile
+    Clear-Content -LiteralPath $envFile
+    & $PrepareScript -RepositoryRoot $tempDir
+    if ((Get-Content -Raw -LiteralPath $envFile) -notmatch 'RELEASE_TAG=v0\.2\.8') {
+        throw 'A new source commit did not receive the next version'
+    }
+
+    # Manual releases can use an already-updated manifest without a staged version diff.
+    (Get-Content -Raw -LiteralPath (Join-Path $tempDir 'Cargo.toml')).Replace('0.2.8', '0.2.9') |
+        Set-Content -LiteralPath (Join-Path $tempDir 'Cargo.toml')
+    (Get-Content -Raw -LiteralPath (Join-Path $tempDir 'Cargo.lock')).Replace('0.2.8', '0.2.9') |
+        Set-Content -LiteralPath (Join-Path $tempDir 'Cargo.lock')
+    Run-Git @('add', 'Cargo.toml', 'Cargo.lock') | Out-Null
+    Run-Git @('commit', '-m', 'Set explicit release version') | Out-Null
+    $manualSha = (Run-Git @('rev-parse', 'HEAD')).Trim()
+    $env:GITHUB_EVENT_NAME = 'workflow_dispatch'
+    $env:GITHUB_REF_TYPE = 'branch'
+    $env:INPUT_TAG = 'v0.2.9'
+    & $PrepareScript -RepositoryRoot $tempDir
+    if ((Run-Git @('rev-parse', 'v0.2.9^{commit}')).Trim() -ne $manualSha) {
+        throw 'Manual release unexpectedly changed a matching manifest'
+    }
+    Write-Host "    Automatic increments, same-version retries and manual releases passed!"
 } finally {
     Pop-Location
-    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-    $env:GITHUB_OUTPUT = $null
-    $env:GITHUB_ENV = $null
-    $env:GITHUB_EVENT_NAME = $null
-    $env:GITHUB_REF = $null
+    $cleanupPath = [System.IO.Path]::GetFullPath($tempDir)
+    $cleanupRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $cleanupPath.StartsWith($cleanupRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [System.IO.Path]::GetFileName($cleanupPath) -notmatch '^heavydrop_release_test_[a-f0-9]{32}$') {
+        throw 'Refusing cleanup outside the owned temporary test directory'
+    }
+    Remove-Item -LiteralPath $cleanupPath -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($key in $savedEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key], 'Process')
+    }
 }
 
 Write-Host "==> All release workflow tests passed successfully!" -ForegroundColor Green

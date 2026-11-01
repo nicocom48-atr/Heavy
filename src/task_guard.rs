@@ -21,3 +21,22 @@ impl<T> Future for AbortOnDrop<T> {
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) { self.0.abort(); }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_owner_drops_worker_resources() {
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (resource, released) = tokio::sync::oneshot::channel::<()>();
+        let worker = AbortOnDrop::new(tokio::spawn(async move {
+            let _resource = resource;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        }));
+        ready.await.unwrap();
+        drop(worker);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), released).await.unwrap().is_err());
+    }
+}

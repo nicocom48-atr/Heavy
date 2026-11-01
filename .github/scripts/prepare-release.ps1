@@ -19,15 +19,18 @@ try {
     $automatic = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main'
     Write-Output "Preparing release for commit $sourceSha (automatic=$automatic)"
 
-    $tags = @(Invoke-Git @('tag', '--list', 'v*')) | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
+    $tags = @(Invoke-Git @('tag', '--list', '--sort=-version:refname', 'v*')) | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
     if ($automatic) {
         foreach ($existing in $tags) {
             $message = (Invoke-Git @('log', '-1', '--format=%B', $existing)) -join "`n"
             $tagSha = (Invoke-Git @('rev-parse', "$existing^{commit}")).Trim()
             if ($message -match "(?m)^Release-Source: $sourceSha$" -or $tagSha -eq $sourceSha) {
-                if ($env:GITHUB_OUTPUT) { "release_exists=true" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
+                # A previous run may have pushed the tag but failed before uploading assets.
+                # Rebuild the same release commit and retry publishing; never allocate another version.
+                Invoke-Git @('checkout', '--detach', $existing) | Out-Null
+                if ($env:GITHUB_OUTPUT) { "release_exists=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
                 if ($env:GITHUB_ENV) { "RELEASE_TAG=$existing" | Add-Content -LiteralPath $env:GITHUB_ENV }
-                Write-Output "Release already prepared for $sourceSha : $existing"
+                Write-Output "Retrying prepared release for $sourceSha : $existing"
                 return
             }
         }
@@ -63,7 +66,7 @@ try {
         Invoke-Git @('config', 'user.name', 'github-actions[bot]') | Out-Null
         Invoke-Git @('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com') | Out-Null
         Invoke-Git @('add', '--', 'Cargo.toml', 'Cargo.lock') | Out-Null
-        $changes = (Invoke-Git @('diff', '--cached', '--name-only')).Trim()
+        $changes = @(Invoke-Git @('diff', '--cached', '--name-only'))
         if ($changes) {
             Invoke-Git @('commit', '-m', "Release $tag", '-m', "Release-Source: $sourceSha") | Out-Null
         }

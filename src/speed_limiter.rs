@@ -142,7 +142,27 @@ mod tests {
         assert_eq!(limiter.get_limit_mbps(), 50);
         assert_eq!(limiter.get_limit_bps(), 50 * 1024 * 1024);
         limiter.set_limit_mbps(0);
-        assert_eq!(limiter.is_limited(), false);
+        assert!(!limiter.is_limited());
+    }
+
+    #[tokio::test]
+    async fn concurrent_consumers_share_one_bandwidth_budget() {
+        let limiter = SpeedLimiter::new(1024 * 1024);
+        let start = Instant::now();
+        tokio::join!(limiter.consume(512 * 1024), limiter.consume(512 * 1024));
+        assert!(start.elapsed() >= std::time::Duration::from_millis(850));
+    }
+
+    #[tokio::test]
+    async fn disabling_limit_wakes_a_throttled_transfer() {
+        let limiter = SpeedLimiter::new(10);
+        let worker = limiter.clone();
+        let task = tokio::spawn(async move { worker.consume(100).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while limiter.state.lock().available_tokens >= 0.0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        limiter.set_limit_bps(0);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task).await.unwrap().unwrap();
     }
 }
 

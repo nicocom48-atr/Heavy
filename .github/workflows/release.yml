@@ -24,6 +24,7 @@ permissions:
 concurrency:
   group: heavydrop-releases
   cancel-in-progress: false
+  queue: max
 
 jobs:
   release-windows:

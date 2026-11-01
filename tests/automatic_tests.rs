@@ -50,13 +50,14 @@ async fn transfer(mode: TransportMode, bytes: &[u8], name: &str) {
     let sender = TransferManager::new();
     let receiver = TransferManager::new();
     let expected_route = if matches!(mode, TransportMode::RelayOnly(_)) { ConnectionType::Relay } else { ConnectionType::DirectLocal };
+    let direct_only = mode == TransportMode::DirectOnly;
     let config = sender_config(path, Session::new().unwrap(), mode);
     let mut used_code = None;
     let (sent, received) = tokio::time::timeout(Duration::from_secs(45), async {
         tokio::join!(sender.run_send(config), async {
             let code = invitation(&sender).await;
             used_code = Some(code.clone());
-            receiver.run_recv(ReceiverConfig { direct_only: false, code, output_dir: output.clone(), force: false,
+            receiver.run_recv(ReceiverConfig { direct_only, code, output_dir: output.clone(), force: false,
                 signaling_server: None, shared_progress: None, cancel_signal: None, discovery: None, speed_limiter: None }).await
         })
     }).await.unwrap();
@@ -80,6 +81,16 @@ async fn full_automatic_invitation_transfers_and_closes_direct_listener() {
 #[tokio::test]
 async fn empty_file_also_waits_for_receiver_confirmation() {
     transfer(TransportMode::DirectOnly, b"", "empty").await;
+}
+
+#[tokio::test]
+async fn strict_p2p_rejects_a_relay_only_invitation_without_contacting_it() {
+    let address = iroh::EndpointAddr::new(iroh::SecretKey::from_bytes(&[7; 32]).public())
+        .with_relay_url("http://127.0.0.1:9".parse().unwrap());
+    let code = PairingCode::generate().unwrap().with_invitation(address, Duration::from_secs(60)).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1),
+        heavydrop::automatic::connect_receiver_with_policy(&code, None, true)).await.unwrap();
+    assert!(format!("{:#}", result.err().expect("strict policy accepted relay-only invitation")).contains("direcciones directas"));
 }
 
 #[tokio::test]

@@ -1,154 +1,95 @@
-# ⚡ HeavyDrop: Transferencia P2P Masiva (50GB+) mediante Códigos Temporales
+# HeavyDrop
 
-**HeavyDrop** es una herramienta en Rust diseñada para la transferencia punto a punto (P2P) de archivos de cualquier tamaño (50 GB, 100 GB, 1 TB o más) de forma rápida, privada y sin complicaciones de red. 
+Transferencia de archivos grandes entre equipos, con interfaz nativa para Windows y CLI en Rust. El transporte predeterminado usa QUIC mediante Iroh, busca una ruta P2P directa y mantiene un relay cifrado como respaldo cuando el NAT o el firewall impiden esa ruta.
 
-Dos usuarios pueden conectarse y transferir archivos compartiendo **únicamente un código temporal único**, sin necesidad de conocer, copiar ni configurar direcciones IP, puertos o comandos de red.
+Las distribuciones oficiales son para **Windows x64**. Descargas: [Releases](https://github.com/nicocom48-atr/Heavy/releases).
 
-> **Nota de Distribución Oficial:** Las versiones oficiales precompiladas de HeavyDrop se distribuyen **exclusivamente para Windows x64**.
+## Conectar dos equipos
 
----
+1. Selecciona o arrastra el archivo en **Enviar archivo** y pulsa **Crear transferencia**.
+2. Copia la **invitación completa `heavy1_…`** y compártela con el receptor. Contiene la identidad y las rutas del emisor; no necesita un servidor manual de códigos cortos.
+3. El receptor pega la invitación en **Código del emisor**, elige una carpeta y pulsa **Conectar**.
+4. La invitación tiene cinco minutos de validez y es de un solo uso. El listener temporal se cierra al terminar, cancelar o expirar.
 
-## 🚀 Experiencia de Usuario Simplificada
+El diseño **Noche / Cian** integra Enviar, Recibir, Historial, Velocidad y Ajustes en una pantalla adaptable. La ventana inicial mide 1280 × 1040 y conserva desplazamiento en pantallas pequeñas. La GUI se abre sin consola adicional, también en desarrollo.
 
-### 📤 Emisor
-1. Abre HeavyDrop.
-2. Selecciona o arrastra el archivo (hasta 1 TB+).
-3. Pulsa **"Crear transferencia"**.
-4. La aplicación genera un código único de 12 caracteres (ejemplo: `KD7M-9Q2P-W8RX`) con validez de 5 minutos.
-5. Comparte ese código con el receptor.
+## ¿Seguimos siendo P2P?
 
-### 📥 Receptor
-1. Abre HeavyDrop.
-2. Introduce el código en la pestaña **"Recibir"**.
-3. Pulsa **"Usar código y conectar"**.
-4. El archivo comienza a descargarse automáticamente con verificación en tiempo real.
+Sí. El modo automático usa direcciones IP directas y perforación de NAT cuando es posible. Iroh puede iniciar la conexión por relay y pasar a una ruta directa; el monitor muestra la ruta seleccionada mientras se transfiere. El relay reenvía tráfico cifrado: no almacena el archivo como un servicio de nube.
 
----
+- **Automático, recomendado:** permite conexión directa LAN/Internet y relay como respaldo. No exige que un relay esté disponible para habilitar una transferencia local. Si no estuvo disponible durante la preparación, la invitación puede contener únicamente rutas directas.
+- **Solo P2P directo (sin relay):** desactiva relays tanto al enviar como al recibir. Puede fallar entre redes con NAT/CGNAT o firewalls restrictivos. No es una forma de atravesar cualquier NAT sin infraestructura auxiliar.
+- **Códigos cortos (TCP compatible):** modo explícito de compatibilidad. Usa descubrimiento LAN y, opcionalmente, el servidor manual de señalización/relay. Completar ese servidor no cambia silenciosamente el transporte automático a TCP.
 
-## 🌐 Conectividad Inteligente en 3 Vías
+Las invitaciones usan ALPN `heavydrop/5` y protocolo v5. **Actualiza ambos equipos**: no son compatibles con clientes de protocolo v4.
 
-El motor de HeavyDrop resuelve automáticamente la mejor ruta de conexión disponible de forma transparente para el usuario:
+## Integridad, reanudación y archivos existentes
 
-```text
-               [ Emisor HeavyDrop ] 
-                        │
-       ┌────────────────┼────────────────┐
-       ▼                ▼                ▼
-[ 1. Directa LAN ]   [ 2. Directa WAN ]   [ 3. Relay Cifrado E2E ]
-Beacon UDP Ciego     Candidatos Públicos    Fallback para CGNAT/Firewalls
-Local en ms          P2P por Internet       100% Cifrado E2E (Dumb Pipe)
-       ▲                ▲                ▲
-       └────────────────┼────────────────┘
-                        │
-              [ Receptor HeavyDrop ]
-```
+Los bloques se cifran con ChaCha20-Poly1305 y se verifican con BLAKE3 antes de escribirlos. El intercambio X25519 rechaza claves no contributivas. Las pruebas autenticadas cubren nombre, tamaño, hash, parámetros del archivo, decisión de recepción, offset de reanudación y confirmación final.
 
-1. **Conexión Directa Local (LAN):** Detección instantánea en la misma red local mediante baliza UDP con ticket ciego. No requiere acceso a Internet ni expone datos a otros equipos de la red Wi-Fi.
-2. **Conexión Directa por Internet (P2P QUIC):** Negociación automática con perforación de NAT (*hole punching*) y transporte QUIC de alto rendimiento mediante el motor de red Iroh (ALPN `heavydrop/4`), o candidatos TCP vía señalización ligera.
-3. **Fallback mediante Relay Cifrado:** Si ambos equipos se encuentran detrás de firewalls restrictivos o CGNAT simétrico, la transferencia se canaliza a través del servidor como un túnel ciego. **Todo el contenido viaja cifrado de extremo a extremo con ChaCha20-Poly1305**, de modo que el relay jamás tiene acceso a las claves ni al contenido del archivo.
+- **Modo rápido**, predeterminado en la GUI: omite el hash completo previo y verifica cada bloque. Reinicia un `.part` anterior, porque nombre y tamaño no identifican de forma segura su contenido.
+- **Verificar archivo completo y reanudar**, en Ajustes: calcula BLAKE3 antes de generar la invitación. Permite reanudar un `.part` compatible y verifica el hash completo al terminar. La preparación de archivos muy grandes puede tardar; la validez de la invitación empieza después.
+- Sin `--force`, un archivo final existente se conserva. Elige otra carpeta en la GUI. La publicación final también rechaza un archivo que aparezca durante la descarga.
+- Se rechazan rutas en nombres recibidos, flujos alternativos NTFS y nombres de dispositivo Windows. Un archivo incompleto no se publica como terminado.
 
----
+La memoria está acotada por bloques, colas y ventanas QUIC, no por el tamaño total del archivo. Las ventanas predeterminadas son 16 MiB por stream y 32 MiB por conexión/envío; la GUI y las bibliotecas añaden consumo. No se promete un total inferior a 20 MB.
 
-## 🔒 Arquitectura y Seguridad Criptográfica
+La invitación es una credencial: quien la posee puede intentar recibir el archivo. Este protocolo utiliza autenticación simétrica; no es un PAKE ni una prueba de conocimiento cero. En el modo TCP compatible el relay puede observar los metadatos del handshake, aunque los bloques del archivo estén cifrados. En QUIC, el handshake de aplicación también viaja cifrado.
 
-1. **Códigos de Emparejamiento Seguros y Legibles:**
-   - 12 caracteres en Base32 Crockford (`XXXX-XXXX-XXXX`), excluyendo caracteres ambiguos (`I`, `L`, `O`, `U`).
-   - 60 bits de entropía real generados mediante entropía criptográfica del sistema operativo (`getrandom`).
-   - Caducidad automática a los 5 minutos e invalidación de un solo uso para prevenir ataques de repetición (*replay attacks*).
-2. **Autenticación Mutua de Conocimiento Cero (Zero-Disclosure):**
-   - El código nunca se envía en texto claro ni por la red local ni al servidor de señalización.
-   - Ambas partes generan y verifican pruebas criptográficas independientes con BLAKE3 en tiempo constante (`constant_time_eq`), impidiendo ataques de intermediario (*Man-In-The-Middle*) o servidores de señalización maliciosos.
-3. **Cifrado de Transporte AEAD (ChaCha20-Poly1305 + X25519):**
-   - Intercambio de claves efímero **X25519** (*Perfect Forward Secrecy*).
-   - Aislamiento de nonces por dirección y salt de sesión único.
-   - Cada bloque de 4 MB se autentica con Poly1305 y hash BLAKE3 antes de guardarse en disco.
-4. **Reanudación Verificable con Archivos `.part`:**
-   - Si se corta la conexión a los 40 GB de un archivo de 50 GB, el receptor verifica el último fragmento local guardado y reanuda exactamente desde ese punto. Si hubo corrupción previa en disco, descarta el tramo inválido automáticamente.
-   - Renombrado atómico al completar el 100% y verificar la integridad global.
-5. **Consumo de Memoria Acotado (< 20 MB RAM):**
-   - Streaming continuo por fragmentos de 4 MB. Nunca se carga el archivo completo en memoria.
-6. **Protección Estricta contra Path Traversal:**
-   - Bloqueo de rutas relativas (`../`) y nombres reservados del sistema Windows (`CON`, `PRN`, `AUX`, `NUL`, etc.).
+## CLI
 
----
+```powershell
+# Automático: hash previo, invitación QUIC y reanudación segura.
+heavydrop send "F:\backups\archivo.iso"
+heavydrop recv "heavy1_INVITACION_COMPLETA" --output-dir "D:\Descargas"
 
-## 🖥️ Interfaz Gráfica Nativa (GUI) y Web
+# Sin hash completo previo: inicio rápido, sin reanudar un parcial anterior.
+heavydrop send "F:\backups\archivo.iso" --no-prehash
 
-Al abrir `heavydrop.exe` sin argumentos (o haciendo doble clic), se inicia la aplicación de escritorio nativa sin una consola adicional, también en compilaciones de desarrollo. La interfaz, desarrollada con `egui`/`eframe`, utiliza el diseño **Noche / Cian**, con campos suaves y acciones secundarias sin contornos. Enviar y recibir aparecen en dos columnas en ventanas amplias o apilados con desplazamiento en ventanas pequeñas. Historial, velocidad y ajustes se integran debajo, sin pestañas ni ventanas adicionales.
+# Solo conexión directa por IP, sin relay en ambos extremos.
+heavydrop send "F:\backups\archivo.iso" --direct-only
+heavydrop recv "heavy1_INVITACION_COMPLETA" --direct-only --output-dir "D:\Descargas"
 
-- 📤 **Enviar (Hero Dropzone):** Arrastra y suelta cualquier archivo (hasta 1 TB+), pulsa "Crear transferencia", copia el código temporal de 12 caracteres con 1 clic y observa la cuenta regresiva en vivo.
-- 📥 **Recibir:** Ingresa el código recibido, selecciona la carpeta de destino con **comprobación en tiempo real del espacio en disco disponible** y descarga con un solo clic.
-- 📜 **Historial Persistente:** Panel integrado con las últimas transferencias y una acción **Ver todo** para consultar el registro completo (fecha y hora en UTC, archivo, tamaño, rol emisor/receptor, estado, velocidad promedio y acceso directo al explorador de archivos).
-- 🎛️ **Límites de Velocidad (Speed Limiter):** Panel integrado para limitar la subida y la bajada en caliente con deslizadores (en MB/s; 0 significa sin límite), sin interrumpir la sesión.
-- 📊 **Telemetría y Gráfica en Tiempo Real:** Monitor dinámico con gráfica de velocidad en tiempo real, medición de velocidad pico (MB/s), bytes transferidos, porcentaje completado, tiempo restante estimado (ETA) y tipo de conexión establecida. Envío y recepción mantienen métricas independientes.
-- 🌐 **Vista Previa Web Interactiva:** Incluye `index.html`, una interfaz web de diseño *cyber-dark* interactiva construida con Tailwind CSS y Lucide Icons para exploración visual.
-
----
-
-## 📖 Uso por Línea de Comandos (CLI)
-
-### 1. Enviar un archivo (genera el código automáticamente)
-
-```bash
-heavydrop send "F:\backups\archivo_50gb.iso"
-```
-
-Salida:
-```text
-================ [ HEAVYDROP P2P TRANSFER ] ================
-  Archivo : archivo_50gb.iso (50.00 GB)
-  Código  : KD7M-9Q2P-W8RX
-  Estado  : Esperando que el receptor ingrese el código (04:59)
-============================================================
-```
-
-### 2. Recibir un archivo usando el código
-
-```bash
+# Compatibilidad LAN con códigos cortos.
+heavydrop send "F:\backups\archivo.iso" --lan-only
 heavydrop recv KD7M-9Q2P-W8RX --output-dir "D:\Descargas"
 ```
 
-El receptor buscará al emisor por red local y señalización de Internet automáticamente.
+`--force` en `recv` permite reemplazar el destino e ignora parciales existentes. `--help` muestra las opciones completas.
 
-### 3. Servidor de Señalización y Relay (necesario entre redes distintas)
+## Servidor manual de códigos cortos
 
-**No hay un servidor público configurado por defecto.** Sin configurar uno, el código
-solo permite descubrir al emisor dentro de la misma red local. Para conectar dos
-equipos en redes distintas, ambos deben utilizar el mismo servidor accesible por
-Internet. El código identifica la transferencia; no contiene una dirección de red.
+Este servicio se usa en el modo TCP compatible, no es un requisito para las invitaciones QUIC:
 
-Si deseas alojar tu propio servicio de señalización y relay en un servidor o VPS:
-
-```bash
-heavydrop server --port 7880
-```
-
-Puedes configurar a los clientes para usar tu servidor mediante la variable de entorno:
 ```powershell
-$env:HEAVYDROP_SIGNAL_SERVER = "tu-servidor.com:7880"
+heavydrop server --port 7880
+heavydrop send "F:\archivo.iso" --legacy-tcp --signal-server "tu-servidor.com:7880"
+heavydrop recv KD7M-9Q2P-W8RX --signal-server "tu-servidor.com:7880" --output-dir "D:\Descargas"
 ```
 
-En la interfaz gráfica también puedes completar **Servidor de Internet** con
-`tu-servidor.com:7880` en ambos equipos antes de iniciar la transferencia. La
-variable de entorno se lee al abrir la aplicación. El campo de la ventana se
-aplica a esa ejecución y no se guarda al cerrarla.
+También se puede configurar `HEAVYDROP_SIGNAL_SERVER` o **Servidor de Internet** en Ajustes. En la GUI se debe activar **Códigos cortos (TCP compatible)** para enviar con ese transporte. El servidor necesita TCP entrante en el puerto elegido. En LAN, el modo compatible usa UDP 7879 para descubrimiento y TCP para datos; QUIC utiliza UDP.
 
-El servidor debe aceptar TCP entrante en el puerto 7880 y ambos clientes deben
-poder conectarse a él. Si la conexión directa está bloqueada por NAT/CGNAT,
-los clientes usan el relay del mismo servidor con el mismo cifrado de extremo a
-extremo. El intercambio de candidatos por sí solo no abre puertos en el router.
-En una LAN, permite HeavyDrop en el firewall de Windows (TCP de transferencia y
-UDP 7879 para descubrimiento).
+## Compilar y verificar
 
----
+```powershell
+cargo build --release --locked
+cargo test --all-targets --locked
+pwsh -ExecutionPolicy Bypass -File tests/release_workflow_tests.ps1
+cargo audit
+```
 
-## 📦 Descargas Oficiales (Windows x64)
+Las pruebas de integración usan archivos generados y conexiones locales. La prueba de infraestructura pública es opcional y está omitida por defecto. No sustituyen una prueba WAN entre equipos en redes distintas ni una auditoría criptográfica independiente. Ver [revisión de seguridad y rendimiento](docs/SECURITY_REVIEW.md).
 
-Los binarios oficiales optimizados se publican automáticamente en la sección de **[Releases en GitHub](https://github.com/nicocom48-atr/Heavy/releases)**:
+## Releases por cada integración en main
 
-- 🪟 **Windows x64:** `heavydrop-vX.Y.Z-windows-x64.zip` (incluye `heavydrop.exe` optimizado y su checksum SHA-256).
+Cada push a `main`, incluidos los merges, activa pruebas, compilación Windows x64 y publicación. La versión patch se calcula a partir de las etiquetas existentes. La versión de `Cargo.toml` y `Cargo.lock` se ajusta en un commit de release al que apunta la etiqueta; el bot no modifica `main`.
 
-Para comprobar la integridad del archivo descargado en PowerShell:
+Las publicaciones se encolan, hasta el límite de GitHub de 100 pendientes. Reintentar una ejecución reutiliza su versión y reconstruye/publica sus archivos, incluso si la etiqueta ya se había subido. No se crea una versión adicional por ese reintento.
+
+Cada release incluye `heavydrop-vX.Y.Z-windows-x64.zip` y su checksum SHA-256:
+
 ```powershell
 Get-FileHash -Algorithm SHA256 heavydrop-vX.Y.Z-windows-x64.zip
 ```
+
+`index.html` se conserva como referencia visual interactiva; la aplicación de escritorio está implementada en egui/eframe.
