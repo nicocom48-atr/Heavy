@@ -8,7 +8,8 @@ trap {
 }
 Push-Location -LiteralPath $RepositoryRoot
 try {
-    $gitCmd = (Get-Command -CommandType Application git).Source
+    $gitCmd = (@(Get-Command -CommandType Application git)[0]).Source
+    if (-not $gitCmd) { $gitCmd = 'git.exe' }
     function Invoke-Git([string[]]$Arguments) {
         $result = & $gitCmd @Arguments
         if ($LASTEXITCODE -ne 0) { throw "Git failed: $($Arguments -join ' ')" }

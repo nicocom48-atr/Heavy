@@ -47,7 +47,8 @@ $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("heavydrop_release_test_
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
 try {
-    $gitCmd = (Get-Command -CommandType Application git).Source
+    $gitCmd = (@(Get-Command -CommandType Application git)[0]).Source
+    if (-not $gitCmd) { $gitCmd = 'git.exe' }
     function Run-Git([string[]]$Arguments) {
         $res = & $gitCmd @Arguments
         if ($LASTEXITCODE -ne 0) { throw "Git failed: $($Arguments -join ' ')" }
