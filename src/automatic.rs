@@ -19,13 +19,13 @@ use crate::{
     transfer_state::{ConnectionType, SharedProgress, TransferStatus},
 };
 
-pub const ALPN: &[u8] = b"heavydrop/4";
+pub const ALPN: &[u8] = b"heavydrop/5";
 
 pub fn high_throughput_transport_config() -> iroh::endpoint::QuicTransportConfig {
     iroh::endpoint::QuicTransportConfig::builder()
-        .stream_receive_window(iroh::endpoint::VarInt::from_u32(512 * 1024))
-        .receive_window(iroh::endpoint::VarInt::from_u32(1024 * 1024))
-        .send_window(1024 * 1024)
+        .stream_receive_window(iroh::endpoint::VarInt::from_u32(16 * 1024 * 1024))
+        .receive_window(iroh::endpoint::VarInt::from_u32(32 * 1024 * 1024))
+        .send_window(32 * 1024 * 1024)
         .build()
 }
 
@@ -85,9 +85,12 @@ pub async fn listen_sender(
             .await
             .context("No se pudo abrir el servidor temporal de transferencia")?,
     ));
-    if mode != TransportMode::DirectOnly {
+    if matches!(mode, TransportMode::RelayOnly(_)) {
         tokio::time::timeout(Duration::from_secs(25), owner.endpoint().online()).await
-            .context("No se pudo acceder a los relays de conexión automática. Comprueba Internet y el firewall")?;
+            .context("No se pudo acceder al relay configurado")?;
+    } else if mode == TransportMode::Automatic {
+        // A relay helps NAT traversal, but its availability must never block a LAN transfer.
+        let _ = tokio::time::timeout(Duration::from_secs(2), owner.endpoint().online()).await;
     }
     // Local interface enumeration can finish just after bind returns.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -123,7 +126,7 @@ pub async fn listen_sender(
             let attempt = tokio::time::timeout(Duration::from_secs(5), async {
                 let connection = incoming.await?;
                 let (send, mut recv) = connection.accept_bi().await?;
-                if recv.read_u8().await? != 4 {
+                if recv.read_u8().await? != 5 {
                     bail!("Prefijo de conexión incompatible");
                 }
                 Ok::<_, anyhow::Error>((connection, send, recv))
@@ -149,14 +152,27 @@ pub async fn connect_receiver(
     code: &PairingCode,
     progress: Option<SharedProgress>,
 ) -> Result<EstablishedConnection> {
+    connect_receiver_with_policy(code, progress, false).await
+}
+
+pub async fn connect_receiver_with_policy(
+    code: &PairingCode,
+    progress: Option<SharedProgress>,
+    direct_only: bool,
+) -> Result<EstablishedConnection> {
     let invitation = code
         .invitation()
         .context("Falta la invitación automática")?;
     if invitation.expires_at <= crate::pairing::unix_now()? {
         bail!("La invitación expiró");
     }
-    let relay_mode = if invitation.endpoint.relay_urls().next().is_some() {
-        RelayMode::Custom(invitation.endpoint.relay_urls().cloned().collect())
+    let mut address = invitation.endpoint.clone();
+    if direct_only {
+        address.addrs.retain(|addr| addr.is_ip());
+        if address.is_empty() { bail!("La invitación no contiene direcciones directas. Desactiva Solo P2P directo o solicita otra invitación."); }
+    }
+    let relay_mode = if !direct_only && address.relay_urls().next().is_some() {
+        RelayMode::Custom(address.relay_urls().cloned().collect())
     } else {
         RelayMode::Disabled
     };
@@ -168,11 +184,11 @@ pub async fn connect_receiver(
             .await?,
     ));
     let connection = tokio::time::timeout(Duration::from_secs(30),
-        owner.endpoint().connect(invitation.endpoint.clone(), ALPN)).await
+        owner.endpoint().connect(address, ALPN)).await
         .context("No se pudo conectar a tiempo. Comprueba que el emisor siga abierto y la invitación no haya expirado")??;
     let (mut send, recv) = connection.open_bi().await?;
     // A QUIC stream becomes visible remotely only after the initiator writes.
-    send.write_u8(4).await?;
+    send.write_u8(5).await?;
     Ok(established(owner, connection, send, recv, progress))
 }
 
@@ -184,7 +200,8 @@ fn connection_type(connection: &Connection) -> ConnectionType {
             match path.remote_addr() {
                 iroh::TransportAddr::Ip(addr)
                     if addr.ip().is_loopback()
-                        || matches!(addr.ip(), std::net::IpAddr::V4(ip) if ip.is_private()) =>
+                        || matches!(addr.ip(), std::net::IpAddr::V4(ip) if ip.is_private() || ip.is_link_local())
+                        || matches!(addr.ip(), std::net::IpAddr::V6(ip) if ip.is_unique_local() || ip.is_unicast_link_local()) =>
                 {
                     ConnectionType::DirectLocal
                 }

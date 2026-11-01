@@ -8,9 +8,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-pub const PROTOCOL_VERSION: u32 = 4;
-pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP04";
-pub const COMPLETION_ACK: &[u8; 8] = b"HVDONE04";
+pub const PROTOCOL_VERSION: u32 = 5;
+pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP05";
+pub const COMPLETION_ACK: &[u8; 8] = b"HVDONE05";
 pub const MIN_CHUNK_SIZE: u32 = 64 * 1024; // 64 KB
 pub const MAX_CHUNK_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
 pub const DEFAULT_CHUNK_SIZE: u32 = 4 * 1024 * 1024; // 4 MB chunk size for high-throughput 50GB transfers
@@ -18,6 +18,8 @@ pub const END_OF_STREAM_OFFSET: u64 = u64::MAX;
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 pub const CHUNK_TIMEOUT: Duration = Duration::from_secs(45);
+// A large file's final disk verification can take much longer than a network block.
+pub const FINALIZATION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HandshakeOffer {
@@ -40,6 +42,34 @@ pub struct HandshakeResponse {
     pub resume_offset: u64,
     pub receiver_auth_proof: [u8; 32],
     pub message: Option<String>,
+}
+
+/// Authenticate the complete offer, including the destination name and file boundaries.
+pub fn offer_proof(offer: &HandshakeOffer, auth_key: &[u8; 32]) -> Result<[u8; 32]> {
+    let mut authenticated = offer.clone();
+    authenticated.sender_auth_proof = [0; 32];
+    let mut mac = blake3::Hasher::new_keyed(auth_key);
+    mac.update(b"heavydrop-v5-offer");
+    mac.update(&serde_json::to_vec(&authenticated)?);
+    Ok(*mac.finalize().as_bytes())
+}
+
+/// Bind acceptance, resume offset and both ephemeral keys to the same transfer.
+pub fn response_proof(offer: &HandshakeOffer, response: &HandshakeResponse, auth_key: &[u8; 32]) -> Result<[u8; 32]> {
+    let mut authenticated = response.clone();
+    authenticated.receiver_auth_proof = [0; 32];
+    let mut mac = blake3::Hasher::new_keyed(auth_key);
+    mac.update(b"heavydrop-v5-response");
+    mac.update(&offer_proof(offer, auth_key)?);
+    mac.update(&serde_json::to_vec(&authenticated)?);
+    Ok(*mac.finalize().as_bytes())
+}
+
+pub fn completion_proof(offer: &HandshakeOffer, response: &HandshakeResponse, auth_key: &[u8; 32]) -> Result<[u8; 32]> {
+    let mut mac = blake3::Hasher::new_keyed(auth_key);
+    mac.update(b"heavydrop-v5-completion");
+    mac.update(&response_proof(offer, response, auth_key)?);
+    Ok(*mac.finalize().as_bytes())
 }
 
 #[derive(Debug)]
@@ -71,15 +101,18 @@ pub fn derive_session_cipher(
     peer_public: &[u8; 32],
     auth_key: &[u8; 32],
     session_salt: &[u8; 32],
-) -> ChaCha20Poly1305 {
+) -> Result<ChaCha20Poly1305> {
     let peer_pub = PublicKey::from(*peer_public);
     let shared = secret.diffie_hellman(&peer_pub);
+    if !shared.was_contributory() {
+        bail!("Clave pública X25519 inválida: intercambio no contributivo");
+    }
     let mut ikm = Vec::with_capacity(32 + 32 + 32);
     ikm.extend_from_slice(shared.as_bytes());
     ikm.extend_from_slice(auth_key);
     ikm.extend_from_slice(session_salt);
     let key_bytes = blake3::derive_key("heavydrop-v3-transport-key", &ikm);
-    ChaCha20Poly1305::new((&key_bytes).into())
+    Ok(ChaCha20Poly1305::new((&key_bytes).into()))
 }
 
 /// Encrypt a chunk payload using ChaCha20-Poly1305 AEAD with direction and session salt nonce isolation
@@ -131,7 +164,6 @@ pub fn sanitize_file_name(raw: &str) -> Result<String> {
     let base_name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .context("File name is invalid or empty")?;
 
@@ -143,10 +175,13 @@ pub fn sanitize_file_name(raw: &str) -> Result<String> {
         );
     }
 
-    let stem = std::path::Path::new(base_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(base_name)
+    if base_name.chars().any(|c| "<>:\"|?*".contains(c))
+        || base_name.ends_with('.') || base_name.ends_with(' ')
+    {
+        bail!("File name contains illegal Windows characters or a trailing dot/space");
+    }
+
+    let stem = base_name.split('.').next().unwrap_or(base_name).trim_end()
         .to_ascii_uppercase();
 
     const RESERVED_NAMES: &[&str] = &[
@@ -295,6 +330,9 @@ pub async fn receive_handshake_response<R: AsyncReadExt + Unpin>(
 
         let response: HandshakeResponse =
             serde_json::from_slice(&buf).context("Failed to parse handshake response")?;
+        if response.protocol_version != PROTOCOL_VERSION {
+            bail!("Protocolo incompatible. Actualiza HeavyDrop en ambos equipos.");
+        }
         Ok(response)
     })
     .await
@@ -309,11 +347,20 @@ pub async fn send_encrypted_chunk<W: AsyncWriteExt + Unpin>(
     ciphertext: &[u8],
 ) -> Result<()> {
     let checksum = blake3::hash(plaintext);
+    send_prepared_chunk(writer, offset, checksum.as_bytes(), ciphertext).await
+}
+
+pub async fn send_prepared_chunk<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    offset: u64,
+    checksum: &[u8; 32],
+    ciphertext: &[u8],
+) -> Result<()> {
 
     let mut header = [0u8; 44];
     header[0..8].copy_from_slice(&offset.to_be_bytes());
     header[8..12].copy_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-    header[12..44].copy_from_slice(checksum.as_bytes());
+    header[12..44].copy_from_slice(checksum);
 
     writer.write_all(&header).await?;
     writer.write_all(ciphertext).await?;
@@ -369,8 +416,8 @@ mod tests {
         let auth_key = [0x5Au8; 32];
         let session_salt = [0x7Eu8; 32];
 
-        let alice_cipher = derive_session_cipher(&alice_sec, &bob_pub, &auth_key, &session_salt);
-        let bob_cipher = derive_session_cipher(&bob_sec, &alice_pub, &auth_key, &session_salt);
+        let alice_cipher = derive_session_cipher(&alice_sec, &bob_pub, &auth_key, &session_salt).unwrap();
+        let bob_cipher = derive_session_cipher(&bob_sec, &alice_pub, &auth_key, &session_salt).unwrap();
 
         let data = b"HeavyDrop v3 code-based P2P encrypted payload!";
         let chunk_index = 0;
@@ -383,7 +430,7 @@ mod tests {
 
         // Wrong auth key fails decryption MAC
         let bad_key = [0x00u8; 32];
-        let charlie_cipher = derive_session_cipher(&bob_sec, &alice_pub, &bad_key, &session_salt);
+        let charlie_cipher = derive_session_cipher(&bob_sec, &alice_pub, &bad_key, &session_salt).unwrap();
         assert!(decrypt_chunk(&charlie_cipher, &session_salt, chunk_index, &encrypted).is_err());
 
         // Tampered ciphertext fails Poly1305 MAC check
@@ -419,3 +466,4 @@ mod tests {
         assert!(sanitize_file_name("evil\0file.txt").is_err());
     }
 }
+

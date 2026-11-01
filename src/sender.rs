@@ -13,7 +13,7 @@ use crate::automatic::TransportMode;
 use crate::connectivity::establish_sender_connection;
 use crate::integrity::compute_file_blake3_async;
 use crate::protocol::{
-    derive_session_cipher, encrypt_chunk, generate_keypair, send_encrypted_chunk,
+    derive_session_cipher, encrypt_chunk, generate_keypair,
     send_end_of_stream, send_handshake_offer, verify_proof_constant_time, HandshakeOffer,
     PROTOCOL_VERSION,
 };
@@ -35,6 +35,9 @@ pub struct SenderConfig {
 }
 
 pub async fn run_sender(config: SenderConfig) -> Result<()> {
+    if !(crate::protocol::MIN_CHUNK_SIZE..=crate::protocol::MAX_CHUNK_SIZE).contains(&config.chunk_size) {
+        bail!("Tamaño de bloque fuera de los límites permitidos");
+    }
     let cancel = config
         .cancel_signal
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
@@ -83,18 +86,9 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         p.file_name = file_name.clone();
         p.total_bytes = file_size;
         p.code_expires_in = Some(config.session.format_remaining());
-        if config.transport_mode == TransportMode::LegacyTcp {
-            p.status = TransferStatus::WaitingForPeer;
-            p.pairing_code = Some(code_formatted.clone());
-            p.status_text = format!(
-                "Servidor listo. Esperando al receptor con código {}...",
-                code_formatted
-            );
-        } else {
             p.status = TransferStatus::Preparing;
             p.pairing_code = None;
-            p.status_text = "Abriendo servidor temporal...".to_string();
-        }
+            p.status_text = if config.skip_prehash { "Abriendo servidor temporal..." } else { "Verificando archivo para permitir reanudación segura..." }.into();
     }
 
     println!(
@@ -125,19 +119,18 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
             .cyan()
     );
 
-    // Compute BLAKE3 in a concurrent task so the temporary server and pairing code become available immediately
-    let hash_file_path = config.file_path.clone();
-    let skip_prehash = config.skip_prehash;
-    let hash_task = tokio::spawn(async move {
-        if skip_prehash {
-            Ok("UNVERIFIED_PREHASH".to_string())
-        } else {
-            compute_file_blake3_async(&hash_file_path).await
-        }
-    });
+    // Do not accept a peer while hashing: terabyte files can exceed handshake timeouts.
+    // The invitation lifetime starts after this cancellable, bounded-buffer pass.
+    let file_hash = if config.skip_prehash { "UNVERIFIED_PREHASH".into() }
+        else { compute_file_blake3_async(&config.file_path).await? };
 
     if config.transport_mode == TransportMode::LegacyTcp {
         config.session.start_waiting();
+        if let Some(ref shared) = config.shared_progress {
+            let mut p = shared.lock();
+            p.status = TransferStatus::WaitingForPeer;
+            p.pairing_code = Some(code_formatted.clone());
+        }
     }
 
     let signal_client = SignalingClient::new(config.signaling_server);
@@ -155,7 +148,6 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         {
             Ok(est) => est,
             Err(e) => {
-                hash_task.abort();
                 return Err(e);
             }
         }
@@ -169,7 +161,6 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         {
             Ok(est) => est,
             Err(e) => {
-                hash_task.abort();
                 return Err(e);
             }
         }
@@ -186,12 +177,6 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         );
     }
 
-    // Await hash completion before handshake
-    let file_hash = match hash_task.await {
-        Ok(res) => res.context("Failed to compute file BLAKE3 checksum")?,
-        Err(e) => bail!("Cálculo de hash BLAKE3 cancelado o fallido: {}", e),
-    };
-
     println!(
         "✓ Receptor conectado ({})! Realizando autenticación criptográfica...",
         established.conn_type.label().green()
@@ -200,13 +185,8 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     // Generate ephemeral X25519 keypair
     let (sender_secret, sender_public) = generate_keypair()?;
 
-    // Compute mutual authentication proof
-    let sender_auth_proof = config
-        .session
-        .code()
-        .compute_sender_proof(config.session.salt(), &sender_public);
-
-    let offer = HandshakeOffer {
+    let auth_key = config.session.code().derive_auth_key();
+    let mut offer = HandshakeOffer {
         protocol_version: PROTOCOL_VERSION,
         session_id: config.session.id().to_string(),
         sender_public_key: sender_public,
@@ -215,8 +195,9 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         file_size,
         chunk_size: config.chunk_size,
         file_hash,
-        sender_auth_proof,
+        sender_auth_proof: [0; 32],
     };
+    offer.sender_auth_proof = crate::protocol::offer_proof(&offer, &auth_key)?;
 
     // Send Handshake Offer to receiver
     send_handshake_offer(&mut established.stream, &offer).await?;
@@ -225,10 +206,7 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     let response = crate::protocol::receive_handshake_response(&mut established.stream).await?;
 
     // Verify Receiver Authentication Proof in constant time
-    let expected_receiver_proof = config
-        .session
-        .code()
-        .compute_receiver_proof(config.session.salt(), &response.receiver_public_key);
+    let expected_receiver_proof = crate::protocol::response_proof(&offer, &response, &auth_key)?;
 
     if !verify_proof_constant_time(&expected_receiver_proof, &response.receiver_auth_proof) {
         if let Some(ref sp) = config.shared_progress {
@@ -262,11 +240,11 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         &response.receiver_public_key,
         &config.session.code().derive_auth_key(),
         config.session.salt(),
-    );
+    )?;
 
-    let mut resume_offset = response.resume_offset;
-    if resume_offset > file_size {
-        resume_offset = 0;
+    let resume_offset = response.resume_offset;
+    if resume_offset > file_size || (resume_offset != file_size && resume_offset % config.chunk_size as u64 != 0) {
+        bail!("Offset de reanudación inválido");
     }
 
     if let Some(ref sp) = config.shared_progress {
@@ -303,7 +281,8 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
 
     struct PreparedChunk {
         offset: u64,
-        plaintext: Vec<u8>,
+        bytes_len: usize,
+        checksum: [u8; 32],
         ciphertext: Vec<u8>,
     }
 
@@ -318,7 +297,7 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     let salt = *config.session.salt();
     let chunk_size = config.chunk_size as u64;
 
-    let reader_handle = tokio::spawn(async move {
+    let reader_handle = crate::task_guard::AbortOnDrop::new(tokio::spawn(async move {
         let mut offset = resume_offset;
         let mut idx = offset / chunk_size;
         let mut buf = vec![0u8; chunk_size as usize];
@@ -341,7 +320,8 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
             };
             let chunk = PreparedChunk {
                 offset,
-                plaintext: buf[..to_read].to_vec(),
+                bytes_len: to_read,
+                checksum: *blake3::hash(&buf[..to_read]).as_bytes(),
                 ciphertext,
             };
             if tx.send(Ok(chunk)).await.is_err() {
@@ -350,7 +330,7 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
             offset += to_read as u64;
             idx += 1;
         }
-    });
+    }));
 
     while let Some(chunk_res) = rx.recv().await {
         if cancel.load(Ordering::Relaxed) {
@@ -359,19 +339,19 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
         }
 
         let chunk = chunk_res?;
-        let bytes_len = chunk.plaintext.len();
-
-        send_encrypted_chunk(
-            &mut established.stream,
-            chunk.offset,
-            &chunk.plaintext,
-            &chunk.ciphertext,
-        )
-        .await?;
+        let bytes_len = chunk.bytes_len;
 
         if let Some(ref limiter) = config.speed_limiter {
             limiter.consume(bytes_len).await;
         }
+
+        crate::protocol::send_prepared_chunk(
+            &mut established.stream,
+            chunk.offset,
+            &chunk.checksum,
+            &chunk.ciphertext,
+        )
+        .await?;
 
         current_offset += bytes_len as u64;
         bytes_since_last_update += bytes_len as u64;
@@ -403,13 +383,18 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
     send_end_of_stream(&mut established.stream).await?;
     let mut ack = [0; 8];
     tokio::time::timeout(
-        crate::protocol::CHUNK_TIMEOUT,
+        crate::protocol::FINALIZATION_TIMEOUT,
         established.stream.read_exact(&mut ack),
     )
     .await
     .context("El receptor no confirmó la verificación del archivo a tiempo")??;
     if &ack != crate::protocol::COMPLETION_ACK {
         bail!("El receptor no confirmó la recepción íntegra del archivo");
+    }
+    let mut proof = [0; 32];
+    tokio::time::timeout(crate::protocol::CHUNK_TIMEOUT, established.stream.read_exact(&mut proof)).await??;
+    if !verify_proof_constant_time(&crate::protocol::completion_proof(&offer, &response, &auth_key)?, &proof) {
+        bail!("Confirmación final de integridad no autenticada");
     }
     established.stream.close(false).await;
 
@@ -440,3 +425,4 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
 
     Ok(())
 }
+

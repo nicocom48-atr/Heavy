@@ -21,6 +21,7 @@ use crate::signaling::SignalingClient;
 use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
 
 pub struct ReceiverConfig {
+    pub direct_only: bool,
     pub code: PairingCode,
     pub output_dir: PathBuf,
     pub force: bool,
@@ -74,14 +75,14 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
             .cyan()
     );
 
-    let signal_client = SignalingClient::new(config.signaling_server);
+    let signal_client = SignalingClient::new(if config.direct_only { None } else { config.signaling_server });
     let discovery = config
         .discovery
         .unwrap_or_else(|| Arc::new(DiscoveryService::new()));
 
     // Automatically resolve and connect to peer without needing IP or port
     let mut established = if config.code.invitation().is_some() {
-        crate::automatic::connect_receiver(&config.code, config.shared_progress.clone()).await?
+        crate::automatic::connect_receiver_with_policy(&config.code, config.shared_progress.clone(), config.direct_only).await?
     } else {
         establish_receiver_connection(&config.code, &signal_client, &discovery, cancel.clone())
             .await?
@@ -105,12 +106,11 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
     );
 
     // Receive Handshake Offer
-    let mut offer = receive_handshake_offer(&mut established.stream).await?;
+    let offer = receive_handshake_offer(&mut established.stream).await?;
 
     // Verify Sender Authentication Proof in constant time
-    let expected_sender_proof = config
-        .code
-        .compute_sender_proof(&offer.session_salt, &offer.sender_public_key);
+    let auth_key = config.code.derive_auth_key();
+    let expected_sender_proof = crate::protocol::offer_proof(&offer, &auth_key)?;
 
     if !verify_proof_constant_time(&expected_sender_proof, &offer.sender_auth_proof) {
         if let Some(ref sp) = config.shared_progress {
@@ -122,7 +122,9 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
     }
 
     // Strict Path Traversal Sanitization
-    offer.file_name = sanitize_file_name(&offer.file_name)?;
+    if sanitize_file_name(&offer.file_name)? != offer.file_name {
+        bail!("El nombre recibido contiene componentes de ruta");
+    }
 
     println!("\n{}", "Detalles de la transferencia:".cyan().bold());
     println!("  Archivo : {}", offer.file_name.bold());
@@ -146,10 +148,7 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
     // Generate ephemeral X25519 keypair
     let (receiver_secret, receiver_public) = generate_keypair()?;
 
-    // Compute mutual authentication proof for receiver
-    let receiver_auth_proof = config
-        .code
-        .compute_receiver_proof(&offer.session_salt, &receiver_public);
+    let cipher = derive_session_cipher(&receiver_secret, &offer.sender_public_key, &auth_key, &offer.session_salt)?;
 
     // Prepare destination using .part file and verifiable metadata
     let prep = PartFileManager::prepare(&config.output_dir, &offer, config.force).await?;
@@ -162,14 +161,15 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
                     .green()
                     .bold()
             );
-            let resp = HandshakeResponse {
+            let mut resp = HandshakeResponse {
                 protocol_version: PROTOCOL_VERSION,
                 receiver_public_key: receiver_public,
                 accepted: false,
                 resume_offset: offer.file_size,
-                receiver_auth_proof,
+                receiver_auth_proof: [0; 32],
                 message: Some("El archivo ya existe y su hash coincide perfectamente.".to_string()),
             };
+            resp.receiver_auth_proof = crate::protocol::response_proof(&offer, &resp, &auth_key)?;
             send_handshake_response(&mut established.stream, &resp).await?;
             established.stream.close(true).await;
             if let Some(ref sp) = config.shared_progress {
@@ -198,23 +198,16 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
     }
 
     // Accept handshake and send response
-    let handshake_resp = HandshakeResponse {
+    let mut handshake_resp = HandshakeResponse {
         protocol_version: PROTOCOL_VERSION,
         receiver_public_key: receiver_public,
         accepted: true,
         resume_offset,
-        receiver_auth_proof,
+        receiver_auth_proof: [0; 32],
         message: None,
     };
+    handshake_resp.receiver_auth_proof = crate::protocol::response_proof(&offer, &handshake_resp, &auth_key)?;
     send_handshake_response(&mut established.stream, &handshake_resp).await?;
-
-    // Derive symmetric ChaCha20-Poly1305 session cipher
-    let cipher = derive_session_cipher(
-        &receiver_secret,
-        &offer.sender_public_key,
-        &config.code.derive_auth_key(),
-        &offer.session_salt,
-    );
 
     if let Some(ref sp) = config.shared_progress {
         let mut p = sp.lock();
@@ -343,6 +336,9 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
     part_manager.file.flush().await?;
 
     if offer.file_hash != "UNVERIFIED_PREHASH" {
+        if let Some(ref shared) = config.shared_progress {
+            shared.lock().status_text = "Verificando integridad completa del archivo en disco...".into();
+        }
         let final_hash = compute_file_blake3_async(&part_manager.part_path).await?;
         if !final_hash.eq_ignore_ascii_case(&offer.file_hash) {
             bail!("Integridad global fallida: el hash final no coincide");
@@ -353,6 +349,7 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
         .stream
         .write_all(crate::protocol::COMPLETION_ACK)
         .await?;
+    established.stream.write_all(&crate::protocol::completion_proof(&offer, &handshake_resp, &auth_key)?).await?;
     established.stream.flush().await?;
     established.stream.close(true).await;
 

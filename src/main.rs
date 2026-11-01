@@ -100,6 +100,8 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
     let result = match cmd {
         cli::Commands::Send {
             lan_only,
+            direct_only,
+            legacy_tcp,
             file,
             no_prehash,
             port,
@@ -119,7 +121,9 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
                 signal_server.or_else(SignalingClient::default_server)
             };
             let config = sender::SenderConfig {
-                transport_mode: if lan_only || configured_server.is_some() {
+                transport_mode: if direct_only {
+                    heavydrop::automatic::TransportMode::DirectOnly
+                } else if lan_only || legacy_tcp {
                     heavydrop::automatic::TransportMode::LegacyTcp
                 } else {
                     heavydrop::automatic::TransportMode::Automatic
@@ -138,6 +142,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
             manager.run_send(config).await
         }
         cli::Commands::Recv {
+            direct_only,
             code,
             output_dir,
             force,
@@ -151,7 +156,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
                 }
             };
 
-            let config = receiver::ReceiverConfig {
+            let config = receiver::ReceiverConfig { direct_only,
                 code: parsed_code,
                 output_dir,
                 force,
@@ -181,3 +186,4 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
         ExitCode::SUCCESS
     }
 }
+

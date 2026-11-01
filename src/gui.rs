@@ -41,6 +41,9 @@ pub struct HeavyDropApp {
     discovery: Arc<DiscoveryService>,
     tokio_rt: Arc<Runtime>,
     signal_server_input: String,
+    direct_only: bool,
+    legacy_tcp: bool,
+    verify_full_file: bool,
 
     // UI feedback
     copied_toast_time: Option<Instant>,
@@ -101,6 +104,9 @@ impl HeavyDropApp {
             tokio_rt: rt,
             signal_server_input: heavydrop::signaling::SignalingClient::default_server()
                 .unwrap_or_default(),
+            direct_only: false,
+            legacy_tcp: false,
+            verify_full_file: false,
 
             copied_toast_time: None,
             copied_toast_text: String::new(),
@@ -267,7 +273,9 @@ impl HeavyDropApp {
         self.send_metrics = TransferMetrics::default();
 
         let config = SenderConfig {
-            transport_mode: if self.signal_server().is_some() {
+            transport_mode: if self.direct_only {
+                heavydrop::automatic::TransportMode::DirectOnly
+            } else if self.legacy_tcp {
                 heavydrop::automatic::TransportMode::LegacyTcp
             } else {
                 heavydrop::automatic::TransportMode::Automatic
@@ -276,7 +284,7 @@ impl HeavyDropApp {
             session,
             preferred_port: 7878,
             chunk_size: 4 * 1024 * 1024,
-            skip_prehash: true,
+            skip_prehash: !self.verify_full_file,
             signaling_server: self.signal_server(),
             shared_progress: None,
             cancel_signal: None,
@@ -312,7 +320,7 @@ impl HeavyDropApp {
         self.recv_metrics = TransferMetrics::default();
         let output_dir = self.recv_output_dir.clone();
 
-        let config = ReceiverConfig {
+        let config = ReceiverConfig { direct_only: self.direct_only,
             code: parsed_code,
             output_dir,
             force: false,
@@ -1600,6 +1608,16 @@ impl HeavyDropApp {
         ui.add_space(8.0);
         note(ui, "Servidor de Internet");
         let busy = self.send_manager.is_busy() || self.recv_manager.is_busy();
+        ui.add_enabled_ui(!busy, |ui| {
+            if ui.checkbox(&mut self.direct_only, "Solo P2P directo (sin relay)").changed() && self.direct_only {
+                self.legacy_tcp = false;
+            }
+            ui.add_enabled_ui(!self.direct_only, |ui| {
+                ui.checkbox(&mut self.legacy_tcp, "Códigos cortos (TCP compatible)");
+            });
+            ui.checkbox(&mut self.verify_full_file, "Verificar archivo completo y reanudar");
+        });
+        note(ui, if self.verify_full_file { "El código se genera después del hash previo." } else { "Modo rápido: verifica bloques y reinicia descargas parciales." });
         text_field(
             ui,
             &mut self.signal_server_input,
@@ -1614,7 +1632,7 @@ impl HeavyDropApp {
                 heavydrop::signaling::SignalingClient::default_server().unwrap_or_default();
         }
         ui.collapsing("Acerca de la conexión", |ui| {
-            note(ui, "Las invitaciones heavy1_ conectan automáticamente. Para códigos cortos entre redes, configura el mismo servidor en ambos equipos.");
+            note(ui, "Las invitaciones heavy1_ priorizan P2P directo y atraviesan NAT cuando es posible. El relay es un respaldo cifrado. Solo P2P directo no usa relays, pero puede fallar con NAT restrictivo. El servidor manual se usa únicamente con códigos cortos TCP.");
             note(ui, "Se aplica a esta ejecución; no se guarda al cerrar.");
         });
         ui.add_space(8.0);
@@ -2029,3 +2047,4 @@ mod tests {
         }
     }
 }
+

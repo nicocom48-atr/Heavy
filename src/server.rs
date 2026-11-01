@@ -50,22 +50,26 @@ impl SignalingServer {
         let sessions = self.sessions.clone();
         let relay_waiters = self.relay_waiters.clone();
 
-        // Background session cleanup task
-        let cleanup_sessions = self.sessions.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                let mut map = cleanup_sessions.lock();
-                map.retain(|_, s| s.created_at.elapsed() < s.ttl);
-            }
-        });
+        let capacity = Arc::new(tokio::sync::Semaphore::new(256));
+        let mut clients = tokio::task::JoinSet::new();
+        let mut cleanup = tokio::time::interval(Duration::from_secs(30));
 
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
+            let (stream, peer_addr) = tokio::select! {
+                accepted = listener.accept() => accepted?,
+                _ = cleanup.tick() => {
+                    sessions.lock().retain(|_, s| s.created_at.elapsed() < s.ttl);
+                    relay_waiters.lock().retain(|_, w| !w.sender.is_closed());
+                    continue;
+                }
+                _ = clients.join_next(), if !clients.is_empty() => continue,
+            };
+            let Ok(permit) = capacity.clone().try_acquire_owned() else { drop(stream); continue; };
             let sessions_clone = sessions.clone();
             let relay_clone = relay_waiters.clone();
 
-            tokio::spawn(async move {
+            clients.spawn(async move {
+                let _permit = permit;
                 if let Err(e) = handle_client(stream, peer_addr, sessions_clone, relay_clone).await
                 {
                     eprintln!("Signaling client error from {}: {}", peer_addr, e);
@@ -92,6 +96,9 @@ async fn handle_client(
             lookup_hash,
             candidates,
         } => {
+            if lookup_hash.is_empty() || lookup_hash.len() > 128 || candidates.len() > 32 {
+                anyhow::bail!("Registro de señalización inválido o demasiado grande");
+            }
             let mut all_candidates = candidates;
             let observed = peer_addr.ip().to_string();
             // Preserve the sender's real listening port, including fallback ports.
@@ -105,6 +112,10 @@ async fn handle_client(
 
             {
                 let mut map = sessions.lock();
+                map.retain(|_, s| s.created_at.elapsed() < s.ttl);
+                if map.len() >= 4096 && !map.contains_key(&lookup_hash) {
+                    anyhow::bail!("El servidor alcanzó el máximo de sesiones activas");
+                }
                 map.insert(
                     lookup_hash,
                     RegisteredSession {
@@ -297,8 +308,8 @@ mod tests {
             let (a_secret, a_public) = generate_keypair().unwrap();
             let (b_secret, b_public) = generate_keypair().unwrap();
             let salt = [7; 32];
-            let a_cipher = derive_session_cipher(&a_secret, &b_public, &[9; 32], &salt);
-            let b_cipher = derive_session_cipher(&b_secret, &a_public, &[9; 32], &salt);
+            let a_cipher = derive_session_cipher(&a_secret, &b_public, &[9; 32], &salt).unwrap();
+            let b_cipher = derive_session_cipher(&b_secret, &a_public, &[9; 32], &salt).unwrap();
             let payload = b"private file contents";
             let encrypted = encrypt_chunk(&a_cipher, &salt, 0, payload).unwrap();
             first.write_all(&encrypted).await.unwrap();
@@ -324,3 +335,4 @@ mod tests {
         assert!(client.connect_relay("registered", "invalid").await.is_err());
     }
 }
+

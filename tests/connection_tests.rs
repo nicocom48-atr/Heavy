@@ -106,7 +106,7 @@ async fn missing_server_is_visible_as_failed_and_can_retry() {
         std::env::temp_dir().join(format!("heavy_connection_error_{}", std::process::id()));
     for _ in 0..2 {
         let result = manager
-            .run_recv(ReceiverConfig {
+            .run_recv(ReceiverConfig { direct_only: false,
                 code: PairingCode::generate().unwrap(),
                 output_dir: output_dir.clone(),
                 force: false,
@@ -131,3 +131,4 @@ fn non_ascii_pairing_input_returns_error_without_panicking() {
     // U+0130 used to pass the truncated u8 alphabet check and break byte slicing.
     assert!(PairingCode::parse("İ23456789ABC").is_err());
 }
+

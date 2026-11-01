@@ -17,9 +17,15 @@ pub struct Cli {
 pub enum Commands {
     /// Enviar un archivo generando un código temporal de conexión
     Send {
-        /// Modo anterior: código corto y descubrimiento TCP en la red local
-        #[arg(long)]
+        /// Usar código corto y descubrimiento TCP local (compatibilidad)
+        #[arg(long, conflicts_with = "direct_only")]
         lan_only: bool,
+        /// Solo P2P directo por QUIC, sin relays ni servicios públicos
+        #[arg(long, conflicts_with_all = ["lan_only", "legacy_tcp"])]
+        direct_only: bool,
+        /// Usar códigos cortos y señalización TCP en lugar de invitaciones QUIC
+        #[arg(long, conflicts_with = "direct_only")]
+        legacy_tcp: bool,
         /// Ruta al archivo a transferir
         #[arg(value_name = "FILE")]
         file: PathBuf,
@@ -39,6 +45,9 @@ pub enum Commands {
 
     /// Recibir un archivo utilizando el código temporal compartido por el emisor
     Recv {
+        /// Rechazar relays: conectar únicamente por una dirección IP directa
+        #[arg(long)]
+        direct_only: bool,
         /// Código de conexión temporal (ej. KD7M-9Q2P-W8RX)
         #[arg(value_name = "CODE")]
         code: String,

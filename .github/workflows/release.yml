@@ -2,16 +2,15 @@ name: Release HeavyDrop (Windows x64)
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Nombre del Tag para la Release (ej. v0.2.0)'
+        description: 'Version para publicar (vMAJOR.MINOR.PATCH)'
         required: true
-        default: 'v0.2.0'
       draft:
-        description: 'Crear como borrador (Draft)'
+        description: 'Publicar como borrador'
         type: boolean
         default: false
       prerelease:
@@ -22,60 +21,80 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: heavydrop-releases
+  cancel-in-progress: false
+
 jobs:
   release-windows:
-    name: Build & Release (Windows x64)
+    name: Test, Build & Release (Windows x64)
     runs-on: windows-latest
+    env:
+      INPUT_TAG: ${{ inputs.tag_name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare release version
+        id: version
+        shell: pwsh
+        run: ./.github/scripts/prepare-release.ps1
 
       - name: Setup Rust toolchain
+        if: steps.version.outputs.release_exists != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: Cache Cargo dependencies
+        if: steps.version.outputs.release_exists != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: x86_64-pc-windows-msvc
 
+      - name: Test release automation
+        if: steps.version.outputs.release_exists != 'true'
+        shell: pwsh
+        run: ./tests/release_workflow_tests.ps1
+
+      - name: Test application
+        if: steps.version.outputs.release_exists != 'true'
+        run: cargo test --all-targets --locked
+
       - name: Build binary in Release mode
+        if: steps.version.outputs.release_exists != 'true'
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
 
       - name: Package Windows Binary
-        id: package
+        if: steps.version.outputs.release_exists != 'true'
         shell: pwsh
         run: |
-          $TAG = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.tag_name }}" }
-          if (-not $TAG -or $TAG.Trim() -eq "") { $TAG = "v0.2.0" }
-          "RELEASE_TAG=$TAG" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $archive = "heavydrop-$env:RELEASE_TAG-windows-x64.zip"
+          New-Item -ItemType Directory -Force -Path staging, artifacts | Out-Null
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/heavydrop.exe' 'staging/heavydrop.exe'
+          Copy-Item README.md 'staging/README.md'
+          Compress-Archive -Path 'staging/*' -DestinationPath "artifacts/$archive" -Force
+          $hash = (Get-FileHash -Algorithm SHA256 "artifacts/$archive").Hash.ToLower()
+          "$hash  $archive" | Set-Content -LiteralPath "artifacts/$archive.sha256" -Encoding ascii -NoNewline
 
-          $ARCHIVE = "heavydrop-${TAG}-windows-x64.zip"
-
-          New-Item -ItemType Directory -Force -Path staging
-
-          $binary = "target/x86_64-pc-windows-msvc/release/heavydrop.exe"
-          if (-not (Test-Path $binary)) {
-              $binary = "target/release/heavydrop.exe"
-          }
-          Copy-Item $binary -Destination "staging/heavydrop.exe"
-          if (Test-Path "README.md") { Copy-Item "README.md" -Destination "staging/README.md" }
-
-          New-Item -ItemType Directory -Force -Path artifacts
-          Compress-Archive -Path "staging/*" -DestinationPath "artifacts/$ARCHIVE" -Force
-
-          Set-Location artifacts
-          $hash = (Get-FileHash -Algorithm SHA256 -Path $ARCHIVE).Hash.ToLower()
-          "$hash  $ARCHIVE" | Out-File -Encoding ascii -NoNewline "$ARCHIVE.sha256"
+      - name: Push verified release tag
+        if: steps.version.outputs.release_exists != 'true'
+        shell: pwsh
+        run: |
+          git push origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot publish release tag' }
 
       - name: Create GitHub Release
+        if: steps.version.outputs.release_exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ env.RELEASE_TAG }}
           name: HeavyDrop ${{ env.RELEASE_TAG }}
           files: artifacts/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
           draft: ${{ inputs.draft || false }}
           prerelease: ${{ inputs.prerelease || false }}
