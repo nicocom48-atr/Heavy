@@ -117,8 +117,8 @@ fn test_aead_transport_encryption_with_session_isolation() {
     let auth_key = [0xAAu8; 32];
     let session_salt = [0xBBu8; 32];
 
-    let alice_cipher = derive_session_cipher(&alice_sec, &bob_pub, &auth_key, &session_salt);
-    let bob_cipher = derive_session_cipher(&bob_sec, &alice_pub, &auth_key, &session_salt);
+    let alice_cipher = derive_session_cipher(&alice_sec, &bob_pub, &auth_key, &session_salt).unwrap();
+    let bob_cipher = derive_session_cipher(&bob_sec, &alice_pub, &auth_key, &session_salt).unwrap();
 
     let data = b"HeavyDrop 50GB test payload";
     let chunk_index = 0;
@@ -233,7 +233,7 @@ async fn test_part_file_resume_and_metadata() {
 
     // 3. Second preparation should detect verified .part and resume exactly from 512 KB
     let prep2 = PartFileManager::prepare(&dir, &offer, false).await.unwrap();
-    let (part_mgr2, resume2) = match prep2 {
+    let (mut part_mgr2, resume2) = match prep2 {
         PrepareResult::Ready {
             part_manager,
             resume_offset,
@@ -241,6 +241,8 @@ async fn test_part_file_resume_and_metadata() {
         _ => panic!("Expected Ready"),
     };
     assert_eq!(resume2, 512 * 1024);
+    part_mgr2.write_verified_chunk(512 * 1024, &chunk1, hash1).await.unwrap();
+    part_mgr2.write_verified_chunk(768 * 1024, &chunk2, hash2).await.unwrap();
 
     // Finalize test file
     let final_path = part_mgr2.finalize().await.unwrap();
@@ -314,7 +316,7 @@ async fn test_full_end_to_end_transfer_using_code_only() {
     let dst_output = dst_dir.clone();
     let receiver_handle = tokio::spawn(async move {
         manager_receiver
-            .run_recv(ReceiverConfig {
+            .run_recv(ReceiverConfig { direct_only: false,
                 code: code_to_share,
                 output_dir: dst_output,
                 force: false,
@@ -378,7 +380,7 @@ async fn test_empty_file_transfer_using_code() {
     let dst_output = dst_dir.clone();
     let receiver_task = tokio::spawn(async move {
         manager_receiver
-            .run_recv(ReceiverConfig {
+            .run_recv(ReceiverConfig { direct_only: false,
                 code,
                 output_dir: dst_output,
                 force: false,
@@ -445,8 +447,7 @@ async fn test_wrong_code_mutual_authentication_failure() {
     let offer = receive_handshake_offer(&mut stream).await.unwrap();
 
     // 1. Receiver checks sender's proof with wrong_code: MUST FAIL!
-    let expected_sender_proof =
-        wrong_code.compute_sender_proof(&offer.session_salt, &offer.sender_public_key);
+    let expected_sender_proof = offer_proof(&offer, &wrong_code.derive_auth_key()).unwrap();
     assert!(!verify_proof_constant_time(
         &expected_sender_proof,
         &offer.sender_auth_proof
@@ -454,15 +455,15 @@ async fn test_wrong_code_mutual_authentication_failure() {
 
     // 2. Send response with wrong_code receiver proof to sender
     let (_, rec_pub) = generate_keypair().unwrap();
-    let wrong_receiver_proof = wrong_code.compute_receiver_proof(&offer.session_salt, &rec_pub);
-    let resp = HandshakeResponse {
+    let mut resp = HandshakeResponse {
         protocol_version: PROTOCOL_VERSION,
         receiver_public_key: rec_pub,
         accepted: true,
         resume_offset: 0,
-        receiver_auth_proof: wrong_receiver_proof,
+        receiver_auth_proof: [0; 32],
         message: None,
     };
+    resp.receiver_auth_proof = response_proof(&offer, &resp, &wrong_code.derive_auth_key()).unwrap();
     send_handshake_response(&mut stream, &resp).await.unwrap();
 
     // 3. Sender MUST reject this invalid proof and abort
@@ -512,3 +513,5 @@ async fn test_cooperative_cancellation_during_transfer() {
     let sender_res = sender_task.await.unwrap();
     assert!(sender_res.is_err());
 }
+
+

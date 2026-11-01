@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::sleep;
+use tokio::sync::Notify;
 
 /// Thread-safe token-bucket speed limiter for dynamic bandwidth regulation in real time.
 #[derive(Clone, Debug)]
@@ -10,6 +11,7 @@ pub struct SpeedLimiter {
     /// Configured maximum bandwidth in bytes per second (0 = unlimited).
     limit_bps: Arc<AtomicU64>,
     state: Arc<Mutex<LimiterState>>,
+    changed: Arc<Notify>,
 }
 
 #[derive(Debug)]
@@ -33,6 +35,7 @@ impl SpeedLimiter {
                 last_check: Instant::now(),
                 available_tokens: 0.0,
             })),
+            changed: Arc::new(Notify::new()),
         }
     }
 
@@ -43,7 +46,12 @@ impl SpeedLimiter {
 
     /// Set limit in Bytes per second (B/s). 0 = unlimited.
     pub fn set_limit_bps(&self, bps: u64) {
+        let mut state = self.state.lock();
+        if self.limit_bps.load(Ordering::Relaxed) == bps { return; }
         self.limit_bps.store(bps, Ordering::Relaxed);
+        state.available_tokens = 0.0;
+        state.last_check = Instant::now();
+        self.changed.notify_waiters();
     }
 
     /// Get current limit in MB/s (0 = unlimited).
@@ -63,19 +71,21 @@ impl SpeedLimiter {
 
     /// Throttle the current async task if necessary to conform to the rate limit.
     pub async fn consume(&self, bytes: usize) {
-        let limit = self.limit_bps.load(Ordering::Relaxed);
-        if limit == 0 || bytes == 0 {
-            return;
-        }
-
-        let wait_duration = {
+        if bytes == 0 { return; }
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let wait_duration = {
             let mut state = self.state.lock();
+            let limit = self.limit_bps.load(Ordering::Relaxed);
+            if limit == 0 { return; }
             let now = Instant::now();
             let elapsed = now.saturating_duration_since(state.last_check).as_secs_f64();
             state.last_check = now;
 
             // Replenish tokens based on elapsed time, capped at 1 second of bandwidth or 8MB burst
-            let max_burst = (limit as f64).max(8.0 * 1024.0 * 1024.0);
+            let max_burst = (limit as f64).min(8.0 * 1024.0 * 1024.0);
             state.available_tokens =
                 (state.available_tokens + elapsed * (limit as f64)).min(max_burst);
 
@@ -83,17 +93,19 @@ impl SpeedLimiter {
                 state.available_tokens -= bytes as f64;
                 None
             } else {
-                let deficit = bytes as f64 - state.available_tokens;
-                state.available_tokens = 0.0;
+                state.available_tokens -= bytes as f64;
+                let deficit = -state.available_tokens;
                 let wait_secs = deficit / (limit as f64);
-                // Advance last_check so sleep time is accounted for
-                state.last_check = now + std::time::Duration::from_secs_f64(wait_secs);
                 Some(std::time::Duration::from_secs_f64(wait_secs))
             }
         };
 
-        if let Some(dur) = wait_duration {
-            sleep(dur).await;
+            if let Some(dur) = wait_duration {
+                tokio::select! {
+                    _ = sleep(dur) => return,
+                    _ = changed.as_mut() => continue,
+                }
+            } else { return; }
         }
     }
 }
