@@ -8,6 +8,14 @@ El transporte predeterminado es Iroh/QUIC. Utiliza rutas directas cuando están 
 
 Esto maximiza las conexiones directas sin prometer que todos los NAT admitan perforación. Es normal necesitar un relay en algunas redes. La disponibilidad del relay no bloquea la preparación de una invitación local; el modo automático espera un tiempo limitado y puede emitir una invitación con solo direcciones IP. No se probó una matriz de routers ni una transferencia WAN real entre dos redes independientes.
 
+### Política de recepción QUIC
+
+La GUI y `recv` aceptan invitaciones QUIC de forma predeterminada. Recibir un código corto requiere consentimiento explícito: **Compatibilidad TCP (metadatos visibles)** en Ajustes o `--legacy-tcp` en la CLI. La validación se ejecuta antes de crear la carpeta de destino, iniciar descubrimiento LAN o consultar el servidor manual. `--direct-only` y la compatibilidad TCP son opciones incompatibles.
+
+El permiso de compatibilidad se aplica a códigos cortos; una invitación QUIC que falle no se reintenta mediante TCP. Esto conserva el cifrado del handshake de la ruta elegida. No modifica el protocolo v5 ni impide el relay cifrado propio de Iroh.
+
+La continuación de política QUIC pasa 50 pruebas locales y Clippy. Incluye regresiones de GUI y CLI, rechazo sin efectos en red/disco y ausencia de fallback TCP cuando expira una invitación QUIC. La prueba pública de Iroh se mantiene opcional; su resultado anterior se indica más abajo.
+
 ## Correcciones ya integradas en main
 
 | Área | Problema encontrado | Comportamiento actual |

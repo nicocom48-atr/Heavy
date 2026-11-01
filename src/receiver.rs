@@ -22,6 +22,8 @@ use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
 
 pub struct ReceiverConfig {
     pub direct_only: bool,
+    /// Explicit consent to the compatibility transport, whose handshake metadata is visible.
+    pub allow_legacy_tcp: bool,
     pub code: PairingCode,
     pub output_dir: PathBuf,
     pub force: bool,
@@ -32,7 +34,21 @@ pub struct ReceiverConfig {
     pub speed_limiter: Option<crate::speed_limiter::SpeedLimiter>,
 }
 
+impl ReceiverConfig {
+    pub fn validate_transport(&self) -> Result<()> {
+        if self.direct_only && self.allow_legacy_tcp {
+            bail!("Solo P2P directo por QUIC no admite compatibilidad TCP");
+        }
+        if self.code.invitation().is_none() && !self.allow_legacy_tcp {
+            bail!("Usa la invitación QUIC completa (heavy1_…). Los códigos cortos requieren activar compatibilidad TCP explícitamente (--legacy-tcp).");
+        }
+        Ok(())
+    }
+}
+
 pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
+    // Enforce policy before creating directories, discovering peers, or contacting a server.
+    config.validate_transport()?;
     let cancel = config
         .cancel_signal
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));

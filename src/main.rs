@@ -143,6 +143,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
         }
         cli::Commands::Recv {
             direct_only,
+            legacy_tcp,
             code,
             output_dir,
             force,
@@ -157,6 +158,7 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
             };
 
             let config = receiver::ReceiverConfig { direct_only,
+                allow_legacy_tcp: legacy_tcp,
                 code: parsed_code,
                 output_dir,
                 force,

@@ -321,6 +321,7 @@ impl HeavyDropApp {
         let output_dir = self.recv_output_dir.clone();
 
         let config = ReceiverConfig { direct_only: self.direct_only,
+            allow_legacy_tcp: self.legacy_tcp,
             code: parsed_code,
             output_dir,
             force: false,
@@ -330,6 +331,10 @@ impl HeavyDropApp {
             discovery: Some(self.discovery.clone()),
             speed_limiter: Some(self.download_limiter.clone()),
         };
+        if let Err(error) = config.validate_transport() {
+            self.recv_error = Some(error.to_string());
+            return;
+        }
 
         let mgr = self.recv_manager.clone();
         *mgr.progress().lock() = TransferProgress {
@@ -1297,20 +1302,23 @@ impl HeavyDropApp {
 
     fn render_receive_panel(&mut self, ui: &mut egui::Ui, busy: bool) {
         section_title(ui, "Recibir archivo", false);
-        note(ui, "Ingresá el código del emisor para iniciar la descarga.");
+        note(ui, "Pegá la invitación completa del emisor para iniciar la descarga.");
         ui.add_space(10.0);
-        note(ui, "Código del emisor");
+        note(ui, "Invitación del emisor");
+        let hint = if self.legacy_tcp { "heavy1_… o código corto TCP" } else { "Pegá la invitación completa heavy1_…" };
         let edit = text_field(
             ui,
             &mut self.recv_code_input,
-            "XXXX-XXXX-XXXX o heavy1_…",
+            hint,
             !busy,
             true,
         );
         if edit.changed() {
             self.recv_error = None;
         }
-        let valid = PairingCode::parse(&self.recv_code_input).is_ok();
+        let parsed = PairingCode::parse(&self.recv_code_input).ok();
+        let blocked_legacy = parsed.as_ref().is_some_and(|code| code.invitation().is_none() && !self.legacy_tcp);
+        let valid = parsed.is_some() && !blocked_legacy;
         ui.add_space(8.0);
         if busy {
             if ui
@@ -1329,7 +1337,7 @@ impl HeavyDropApp {
             self.start_receive_task();
         }
         if !busy && !self.recv_code_input.trim().is_empty() && !valid {
-            note(ui, "Revisa el código o pega la invitación completa.");
+            note(ui, if blocked_legacy { "Este es un código TCP antiguo. Pedí una invitación completa o habilitá compatibilidad en Ajustes." } else { "Revisa la invitación y pegala completa." });
         }
         ui.add_space(12.0);
         let progress = self.recv_manager.progress().lock().clone();
@@ -1348,7 +1356,7 @@ impl HeavyDropApp {
                         ui.painter().circle_filled(dot.center(), 3.0, ACCENT);
                         ui.label(egui::RichText::new("Listo para recibir").strong());
                     });
-                    note(ui, "Ingresá el código del emisor para iniciar la descarga.");
+                    note(ui, "Pegá la invitación completa para conectar de forma segura.");
                 });
         }
         ui.add_space(12.0);
@@ -1606,30 +1614,33 @@ impl HeavyDropApp {
     fn render_settings_panel(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Ajustes").size(17.0).strong());
         ui.add_space(8.0);
-        note(ui, "Servidor de Internet");
+        note(ui, if self.legacy_tcp { "Compatibilidad TCP activada" } else if self.direct_only { "QUIC · Solo conexión directa" } else { "QUIC automático · Recomendado" });
         let busy = self.send_manager.is_busy() || self.recv_manager.is_busy();
         ui.add_enabled_ui(!busy, |ui| {
             if ui.checkbox(&mut self.direct_only, "Solo P2P directo (sin relay)").changed() && self.direct_only {
                 self.legacy_tcp = false;
             }
             ui.add_enabled_ui(!self.direct_only, |ui| {
-                ui.checkbox(&mut self.legacy_tcp, "Códigos cortos (TCP compatible)");
+                ui.checkbox(&mut self.legacy_tcp, "Compatibilidad TCP (metadatos visibles)");
             });
             ui.checkbox(&mut self.verify_full_file, "Verificar archivo completo y reanudar");
         });
         note(ui, if self.verify_full_file { "El código se genera después del hash previo." } else { "Modo rápido: verifica bloques y reinicia descargas parciales." });
-        text_field(
-            ui,
-            &mut self.signal_server_input,
-            "Opcional · servidor:7880",
-            !busy,
-            false,
-        );
-        if busy {
-            note(ui, "Disponible al terminar la transferencia.");
-        } else if text_action(ui, "Restablecer").clicked() {
-            self.signal_server_input =
-                heavydrop::signaling::SignalingClient::default_server().unwrap_or_default();
+        if self.legacy_tcp {
+            note(ui, "Servidor de compatibilidad TCP");
+            text_field(
+                ui,
+                &mut self.signal_server_input,
+                "Opcional · servidor:7880",
+                !busy,
+                false,
+            );
+            if busy {
+                note(ui, "Disponible al terminar la transferencia.");
+            } else if text_action(ui, "Restablecer").clicked() {
+                self.signal_server_input =
+                    heavydrop::signaling::SignalingClient::default_server().unwrap_or_default();
+            }
         }
         ui.collapsing("Acerca de la conexión", |ui| {
             note(ui, "Las invitaciones heavy1_ priorizan P2P directo y atraviesan NAT cuando es posible. El relay es un respaldo cifrado. Solo P2P directo no usa relays, pero puede fallar con NAT restrictivo. El servidor manual se usa únicamente con códigos cortos TCP.");
@@ -1868,6 +1879,17 @@ mod tests {
             rt,
             std::env::temp_dir().join(format!("heavydrop_gui_{name}_{}.json", std::process::id())),
         )
+    }
+
+    #[test]
+    fn default_gui_rejects_short_codes_without_starting_a_transfer() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, "quic_policy");
+        app.recv_code_input = "KD7M-9Q2P-W8RX".into();
+        app.start_receive_task();
+        assert!(app.recv_error.as_ref().is_some_and(|error| error.contains("QUIC")));
+        assert!(!app.recv_manager.is_busy());
+        assert_eq!(app.recv_manager.progress().lock().status, TransferStatus::Idle);
     }
 
     #[test]

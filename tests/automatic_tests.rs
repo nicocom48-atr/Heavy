@@ -57,7 +57,7 @@ async fn transfer(mode: TransportMode, bytes: &[u8], name: &str) {
         tokio::join!(sender.run_send(config), async {
             let code = invitation(&sender).await;
             used_code = Some(code.clone());
-            receiver.run_recv(ReceiverConfig { direct_only, code, output_dir: output.clone(), force: false,
+            receiver.run_recv(ReceiverConfig { allow_legacy_tcp: false, direct_only, code, output_dir: output.clone(), force: false,
                 signaling_server: None, shared_progress: None, cancel_signal: None, discovery: None, speed_limiter: None }).await
         })
     }).await.unwrap();
@@ -148,4 +148,3 @@ async fn expiration_closes_temporary_server() {
 async fn public_relay_automatic_configuration_smoke_test() {
     transfer(TransportMode::Automatic, &vec![0x42; 32 * 1024], "public").await;
 }
-

@@ -316,7 +316,7 @@ async fn test_full_end_to_end_transfer_using_code_only() {
     let dst_output = dst_dir.clone();
     let receiver_handle = tokio::spawn(async move {
         manager_receiver
-            .run_recv(ReceiverConfig { direct_only: false,
+            .run_recv(ReceiverConfig { allow_legacy_tcp: true, direct_only: false,
                 code: code_to_share,
                 output_dir: dst_output,
                 force: false,
@@ -380,7 +380,7 @@ async fn test_empty_file_transfer_using_code() {
     let dst_output = dst_dir.clone();
     let receiver_task = tokio::spawn(async move {
         manager_receiver
-            .run_recv(ReceiverConfig { direct_only: false,
+            .run_recv(ReceiverConfig { allow_legacy_tcp: true, direct_only: false,
                 code,
                 output_dir: dst_output,
                 force: false,
@@ -513,5 +513,3 @@ async fn test_cooperative_cancellation_during_transfer() {
     let sender_res = sender_task.await.unwrap();
     assert!(sender_res.is_err());
 }
-
-

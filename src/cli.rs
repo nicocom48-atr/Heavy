@@ -45,10 +45,13 @@ pub enum Commands {
 
     /// Recibir un archivo utilizando el código temporal compartido por el emisor
     Recv {
+        /// Permitir códigos cortos TCP: el handshake expone metadatos al relay
+        #[arg(long, conflicts_with = "direct_only")]
+        legacy_tcp: bool,
         /// Rechazar relays: conectar únicamente por una dirección IP directa
         #[arg(long)]
         direct_only: bool,
-        /// Código de conexión temporal (ej. KD7M-9Q2P-W8RX)
+        /// Invitación completa heavy1_… (los códigos cortos requieren --legacy-tcp)
         #[arg(value_name = "CODE")]
         code: String,
 
@@ -74,4 +77,18 @@ pub enum Commands {
 
     /// Abrir la interfaz gráfica de escritorio (GUI)
     Gui,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receiver_defaults_to_quic_and_legacy_requires_an_explicit_flag() {
+        let cli = Cli::try_parse_from(["heavydrop", "recv", "KD7M-9Q2P-W8RX"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Recv { legacy_tcp: false, .. })));
+        let cli = Cli::try_parse_from(["heavydrop", "recv", "KD7M-9Q2P-W8RX", "--legacy-tcp"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Recv { legacy_tcp: true, .. })));
+        assert!(Cli::try_parse_from(["heavydrop", "recv", "KD7M-9Q2P-W8RX", "--legacy-tcp", "--direct-only"]).is_err());
+    }
 }

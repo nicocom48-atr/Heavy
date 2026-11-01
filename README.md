@@ -21,6 +21,8 @@ Sí. El modo automático usa direcciones IP directas y perforación de NAT cuand
 - **Solo P2P directo (sin relay):** desactiva relays tanto al enviar como al recibir. Puede fallar entre redes con NAT/CGNAT o firewalls restrictivos. No es una forma de atravesar cualquier NAT sin infraestructura auxiliar.
 - **Códigos cortos (TCP compatible):** modo explícito de compatibilidad. Usa descubrimiento LAN y, opcionalmente, el servidor manual de señalización/relay. Completar ese servidor no cambia silenciosamente el transporte automático a TCP.
 
+El receptor también exige habilitar esa compatibilidad: en la GUI se activa en Ajustes; en la CLI se utiliza `recv --legacy-tcp`. Sin esa elección, los códigos cortos se rechazan antes de crear carpetas o contactar servidores. Una invitación QUIC fallida nunca se convierte automáticamente en una conexión TCP.
+
 Las invitaciones usan ALPN `heavydrop/5` y protocolo v5. **Actualiza ambos equipos**: no son compatibles con clientes de protocolo v4.
 
 ## Integridad, reanudación y archivos existentes
@@ -52,7 +54,7 @@ heavydrop recv "heavy1_INVITACION_COMPLETA" --direct-only --output-dir "D:\Desca
 
 # Compatibilidad LAN con códigos cortos.
 heavydrop send "F:\backups\archivo.iso" --lan-only
-heavydrop recv KD7M-9Q2P-W8RX --output-dir "D:\Descargas"
+heavydrop recv KD7M-9Q2P-W8RX --legacy-tcp --output-dir "D:\Descargas"
 ```
 
 `--force` en `recv` permite reemplazar el destino e ignora parciales existentes. `--help` muestra las opciones completas.
@@ -64,10 +66,10 @@ Este servicio se usa en el modo TCP compatible, no es un requisito para las invi
 ```powershell
 heavydrop server --port 7880
 heavydrop send "F:\archivo.iso" --legacy-tcp --signal-server "tu-servidor.com:7880"
-heavydrop recv KD7M-9Q2P-W8RX --signal-server "tu-servidor.com:7880" --output-dir "D:\Descargas"
+heavydrop recv KD7M-9Q2P-W8RX --legacy-tcp --signal-server "tu-servidor.com:7880" --output-dir "D:\Descargas"
 ```
 
-También se puede configurar `HEAVYDROP_SIGNAL_SERVER` o **Servidor de Internet** en Ajustes. En la GUI se debe activar **Códigos cortos (TCP compatible)** para enviar con ese transporte. El servidor necesita TCP entrante en el puerto elegido. En LAN, el modo compatible usa UDP 7879 para descubrimiento y TCP para datos; QUIC utiliza UDP.
+También se puede configurar `HEAVYDROP_SIGNAL_SERVER` o **Servidor de compatibilidad TCP** en Ajustes. Ese campo aparece al activar **Compatibilidad TCP (metadatos visibles)**, necesaria tanto para enviar como para recibir códigos cortos. El servidor necesita TCP entrante en el puerto elegido. En LAN, el modo compatible usa UDP 7879 para descubrimiento y TCP para datos; QUIC utiliza UDP.
 
 ## Compilar y verificar
 
