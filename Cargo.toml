@@ -1,6 +1,6 @@
 [package]
 name = "heavydrop"
-version = "0.2.6"
+version = "0.2.13"
 edition = "2021"
 authors = ["heavydrop contributors"]
 description = "High-performance P2P file transfer tool (GUI & CLI) for massive files (50GB-1TB+) over QUIC with ChaCha20-Poly1305 AEAD, BLAKE3 verification, and instant pairing codes"
