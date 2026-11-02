@@ -206,6 +206,15 @@ impl PartFileManager {
         })
     }
 
+    /// Persist current metadata state to .part.meta
+    pub async fn persist_metadata(&mut self) -> Result<()> {
+        let json = serde_json::to_vec(&self.metadata)?;
+        tokio::fs::write(&self.meta_path, json)
+            .await
+            .context("Failed to write part metadata")?;
+        Ok(())
+    }
+
     /// Write verified chunk and persist metadata update
     pub async fn write_verified_chunk(
         &mut self,
@@ -248,16 +257,14 @@ impl PartFileManager {
             self.recent_chunk_hashes.retain(|&end, _| end >= contiguous_end);
         }
 
-        let json = serde_json::to_vec(&self.metadata)?;
-        tokio::fs::write(&self.meta_path, json)
-            .await
-            .context("Failed to write part metadata")?;
+        self.persist_metadata().await?;
 
         Ok(())
     }
 
     /// Commit, flush and atomically rename .part to final target file
     pub async fn finalize(mut self) -> Result<PathBuf> {
+        self.persist_metadata().await?;
         self.file
             .flush()
             .await

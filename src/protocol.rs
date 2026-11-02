@@ -23,9 +23,9 @@ pub const FINALIZATION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 // Configurable transport & parallel stream constants
 pub const DEFAULT_PARALLEL_STREAMS: u32 = 4;
-pub const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;  // 8 MiB per stream (anti-gap threshold)
-pub const DEFAULT_CONN_RECEIVE_WINDOW: u32 = 32 * 1024 * 1024;   // 32 MiB total connection
-pub const DEFAULT_SEND_WINDOW: u64 = 32 * 1024 * 1024;          // 32 MiB send window
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 1024 * 1024;  // 1 MiB per stream (anti-gap threshold: max ~850 packets, strictly < MAX_CHUNKS 1024)
+pub const DEFAULT_CONN_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;   // 8 MiB total connection
+pub const DEFAULT_SEND_WINDOW: u64 = 8 * 1024 * 1024;          // 8 MiB send window
 
 pub fn default_parallel_streams() -> u32 {
     1

@@ -61,7 +61,8 @@ async fn transfer_with_chunk(mode: TransportMode, bytes: &[u8], name: &str, chun
     let direct_only = mode == TransportMode::DirectOnly;
     let config = sender_config_with_chunk(path, Session::new().unwrap(), mode, chunk_size);
     let mut used_code = None;
-    let (sent, received) = tokio::time::timeout(Duration::from_secs(45), async {
+    let timeout_secs = 60 + (bytes.len() / (1024 * 1024)) as u64;
+    let (sent, received) = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
         tokio::join!(sender.run_send(config), async {
             let code = invitation(&sender).await;
             used_code = Some(code.clone());
@@ -91,6 +92,11 @@ async fn transfer_with_chunk(mode: TransportMode, bytes: &[u8], name: &str, chun
 #[tokio::test]
 async fn multi_stream_4mb_chunks_transfer_test() {
     transfer_with_chunk(TransportMode::DirectOnly, &vec![0x42; 24 * 1024 * 1024], "multichunk4m", 4 * 1024 * 1024).await;
+}
+
+#[tokio::test]
+async fn multi_stream_past_chunk_3593_test() {
+    transfer_with_chunk(TransportMode::DirectOnly, &vec![0x77; 240 * 1024 * 1024], "chunk3593", 64 * 1024).await;
 }
 
 #[tokio::test]

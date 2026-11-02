@@ -22,7 +22,7 @@ use crate::signaling::SignalingClient;
 use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-const CHANNEL_BUFFER_CHUNKS: usize = 8; // Max 32 MiB in memory
+const CHANNEL_BUFFER_CHUNKS: usize = 64; // Max 4-8 MiB pipeline buffer
 
 pub struct ReceiverConfig {
     pub direct_only: bool,
@@ -294,9 +294,16 @@ async fn run_stream_reader<R: AsyncReadExt + Unpin>(
             }
 
             let mut ciphertext = vec![0u8; header.ciphertext_length as usize];
-            if let Err(e) = tokio::time::timeout(CHUNK_TIMEOUT, reader.read_exact(&mut ciphertext)).await {
-                let _ = tx.send(Err(anyhow::anyhow!("Timeout de red leyendo bloque en stream {}: {}", stream_id, e))).await;
-                return;
+            match tokio::time::timeout(CHUNK_TIMEOUT, reader.read_exact(&mut ciphertext)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let _ = tx.send(Err(anyhow::anyhow!("Fallo de red al leer bloque cifrado en stream {}: {:#}", stream_id, e))).await;
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(anyhow::anyhow!("Timeout de red leyendo bloque en stream {}: {}", stream_id, e))).await;
+                    return;
+                }
             }
 
             let chunk_index = current_offset / chunk_size;
@@ -649,6 +656,7 @@ async fn run_receiver_session(
         let chunk = match chunk_res {
             Ok(c) => c,
             Err(e) => {
+                let _ = part_manager.persist_metadata().await;
                 reader_join_set.shutdown().await;
                 return Err(e);
             }
@@ -706,6 +714,8 @@ async fn run_receiver_session(
             bytes_since_last_update = 0;
         }
     }
+
+    part_manager.persist_metadata().await?;
 
     // Await reader tasks to ensure no errors were missed
     while let Some(res) = reader_join_set.join_next().await {

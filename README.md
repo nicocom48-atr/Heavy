@@ -30,10 +30,10 @@ Las invitaciones usan ALPN `heavydrop/6` y protocolo v6. **Actualiza ambos equip
 Para transferencias masivas de 10 GB a 1 TB+ a través de Internet con fluctuaciones, latencia y pérdida de paquetes, la versión 6 introduce:
 
 1. **Lectura Desacoplada (Decoupled Pipeline):** En el receptor, tareas asíncronas dedicadas se encargan exclusivamente de drenar los streams QUIC a máxima velocidad hacia un canal acotado (`tokio::sync::mpsc`). El descifrado ChaCha20-Poly1305, el cálculo de hash BLAKE3 y la escritura en disco se delegan a hilos de cómputo bloqueante (`spawn_blocking`). Esto garantiza que los búferes de reensamblado de QUIC nunca se atasquen esperando I/O de disco.
-2. **Ventanas de Transporte Anti-Gaps:** Prevención del error interno `too many gaps in stream buffer` mediante ventanas de control de flujo conservadoras y balanceadas:
-   - Ventana por stream: **8 MiB** (`DEFAULT_STREAM_RECEIVE_WINDOW`).
-   - Ventana de conexión acumulada: **32 MiB** (`DEFAULT_CONN_RECEIVE_WINDOW`).
-   - Ventana de envío: **32 MiB** (`DEFAULT_SEND_WINDOW`).
+2. **Ventanas de Transporte Anti-Gaps:** Prevención matemática del error interno de QUIC `too many gaps in stream buffer` manteniendo la ventana por stream estrictamente por debajo del límite de fragmentos desordenados (`MAX_CHUNKS = 1024`):
+   - Ventana por stream: **1 MiB** (`DEFAULT_STREAM_RECEIVE_WINDOW`, máx. ~850 datagramas UDP).
+   - Ventana de conexión acumulada: **8 MiB** (`DEFAULT_CONN_RECEIVE_WINDOW`).
+   - Ventana de envío: **8 MiB** (`DEFAULT_SEND_WINDOW`).
 3. **Multi-Stream Paralelo (4 Streams QUIC):** En conexiones QUIC con archivos de tamaño suficiente, la transferencia se particiona automáticamente en **4 streams bidireccionales paralelos**. Cada stream transfiere su rango asignado de bloques con encabezados independientes, distribuyendo los paquetes en la red y eliminando el bloqueo de cabeza de línea (*Head-of-Line blocking*).
 4. **Control de Velocidad Dinámico en Caliente:** Regulación de ancho de banda en tiempo real mediante *token-bucket* compartido cooperativamente entre todos los streams de subida y bajada. Los límites pueden modificarse en tiempo real durante una transferencia activa desde los controles de la GUI o CLI sin interrumpir la sesión.
 5. **Reconexión y Reanudación Automática (10 Intentos con Backoff Exponencial):** Ante cortes transitorios de red, saturación, microdesconexiones o fallos en bloques individuales en tránsito, el receptor reintenta conectarse automáticamente hasta 10 veces con backoff exponencial. El emisor mantiene su servidor temporal activo y la transferencia se reanuda inmediatamente desde el último bloque verificado sin perder los datos ya descargados.
