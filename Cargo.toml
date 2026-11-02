@@ -25,7 +25,8 @@ x25519-dalek = { version = "3.0", features = ["static_secrets"] }
 socket2 = "0.6"
 iroh = "1.4.1"
 base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 iroh-relay = { version = "1.4.1", features = ["server"] }
-

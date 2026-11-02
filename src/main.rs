@@ -5,13 +5,11 @@ mod gui;
 
 use clap::Parser;
 use colored::Colorize;
-use heavydrop::manager;
 use heavydrop::pairing::PairingCode;
 use heavydrop::receiver;
 use heavydrop::sender;
 use heavydrop::server::SignalingServer;
 use heavydrop::session::Session;
-use heavydrop::signaling::SignalingClient;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -33,6 +31,7 @@ fn main() -> ExitCode {
         attach_console();
     }
     let args = cli::Cli::parse();
+    heavydrop::init_logging(args.verbose);
 
     // If no subcommand was passed or user explicitly chose `gui`, launch the native window GUI
     match args.command {
@@ -43,7 +42,7 @@ fn main() -> ExitCode {
                 .build()
                 .expect("Failed to build Tokio runtime");
 
-            rt.block_on(async { run_cli(cmd).await })
+            rt.block_on(async { run_cli(cmd, args.verbose).await })
         }
     }
 }
@@ -59,45 +58,31 @@ fn launch_gui() -> ExitCode {
     // Keep the Tokio runtime context entered on the main thread so any tokio calls work
     let _guard = rt.enter();
 
-    let options = eframe::NativeOptions {
+    let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 1040.0])
-            .with_min_inner_size([680.0, 480.0])
+            .with_inner_size([1120.0, 720.0])
+            .with_min_inner_size([900.0, 560.0])
             .with_title("HeavyDrop — P2P File Transfer"),
         ..Default::default()
     };
 
-    let rt_clone = rt.clone();
     let result = eframe::run_native(
         "HeavyDrop",
-        options,
-        Box::new(move |cc| Ok(Box::new(gui::HeavyDropApp::new(cc, rt_clone)))),
+        native_options,
+        Box::new(|cc| Ok(Box::new(gui::HeavyDropApp::new(cc, rt.clone())))),
     );
 
-    if let Err(e) = result {
-        eprintln!("Failed to launch GUI: {}", e);
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error starting HeavyDrop GUI: {}", e);
+            ExitCode::FAILURE
+        }
     }
 }
 
-async fn run_cli(cmd: cli::Commands) -> ExitCode {
-    let manager = manager::TransferManager::new();
-
-    // Hook Ctrl+C for cooperative cancellation
-    let mgr_cancel = manager.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            println!(
-                "\n{}",
-                "Recibido Ctrl+C, cancelando transferencia cooperativamente...".yellow()
-            );
-            mgr_cancel.cancel();
-        }
-    });
-
-    let result = match cmd {
+async fn run_cli(command: cli::Commands, verbose: bool) -> ExitCode {
+    match command {
         cli::Commands::Send {
             lan_only,
             direct_only,
@@ -110,16 +95,11 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
             let session = match Session::new() {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Error al generar sesión y código de emparejamiento: {}", e);
+                    eprintln!("Error creating session: {}", e);
                     return ExitCode::FAILURE;
                 }
             };
 
-            let configured_server = if lan_only {
-                None
-            } else {
-                signal_server.or_else(SignalingClient::default_server)
-            };
             let config = sender::SenderConfig {
                 transport_mode: if direct_only {
                     heavydrop::automatic::TransportMode::DirectOnly
@@ -133,17 +113,28 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
                 preferred_port: port,
                 chunk_size: 4 * 1024 * 1024,
                 skip_prehash: no_prehash,
-                signaling_server: configured_server,
+                signaling_server: signal_server,
                 shared_progress: None,
                 cancel_signal: None,
                 speed_limiter: None,
             };
 
-            manager.run_send(config).await
+            match sender::run_sender(config).await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => {
+                    if verbose {
+                        eprintln!("\n{} Fallo en la transferencia: {:#?}", "ERROR:".red().bold(), e);
+                    } else {
+                        eprintln!("\n{} Fallo en la transferencia: {:#}", "ERROR:".red().bold(), e);
+                        eprintln!("(Usa --verbose o -v para ver el detalle técnico del error)");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
         }
         cli::Commands::Recv {
-            direct_only,
             legacy_tcp,
+            direct_only,
             code,
             output_dir,
             force,
@@ -152,40 +143,47 @@ async fn run_cli(cmd: cli::Commands) -> ExitCode {
             let parsed_code = match PairingCode::parse(&code) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("Error en el código de conexión: {}", e);
+                    eprintln!("Invalid pairing code or invitation: {}", e);
                     return ExitCode::FAILURE;
                 }
             };
 
-            let config = receiver::ReceiverConfig { direct_only,
+            let config = receiver::ReceiverConfig {
                 allow_legacy_tcp: legacy_tcp,
+                direct_only,
                 code: parsed_code,
                 output_dir,
                 force,
-                signaling_server: signal_server.or_else(SignalingClient::default_server),
+                signaling_server: signal_server,
                 shared_progress: None,
                 cancel_signal: None,
                 discovery: None,
                 speed_limiter: None,
             };
 
-            manager.run_recv(config).await
+            match receiver::run_receiver(config).await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => {
+                    if verbose {
+                        eprintln!("\n{} Fallo en la transferencia: {:#?}", "ERROR:".red().bold(), e);
+                    } else {
+                        eprintln!("\n{} Fallo en la transferencia: {:#}", "ERROR:".red().bold(), e);
+                        eprintln!("(Usa --verbose o -v para ver el detalle técnico del error)");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
         }
+        cli::Commands::Gui => ExitCode::SUCCESS,
         cli::Commands::Server { port } => {
             let server = SignalingServer::new(port);
-            server.run().await
+            match server.run().await {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("Signaling server error: {:#}", e);
+                    ExitCode::FAILURE
+                }
+            }
         }
-        cli::Commands::Gui => unreachable!(),
-    };
-
-    if let Err(e) = result {
-        eprintln!("\n{} {}", "ERROR:".red().bold(), e);
-        for cause in e.chain().skip(1) {
-            eprintln!("  {} {}", "Causa:".yellow(), cause);
-        }
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
     }
 }
-

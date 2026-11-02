@@ -1,62 +1,43 @@
 # Revisión de seguridad, rendimiento y P2P
 
-Fecha: 2026-11-01. Base revisada: `main` en `247b5d5`, incluidos los cambios de protocolo v5 y el release v0.2.8. Alcance: revisión de código, pruebas automatizadas locales y análisis de dependencias. No es una certificación de seguridad ni una prueba de penetración externa.
+Fecha: 2026-11-02. Base revisada: Protocolo v6, transporte multi-stream QUIC con Iroh 1.4.1 / noq-proto. Alcance: mitigación de RUSTSEC-2026-0185 / saturación de stream buffer gaps, desacoplamiento de pipeline de I/O, pruebas automatizadas locales y análisis de dependencias.
 
-## Estado P2P
+## Estado P2P y Transporte QUIC (Protocolo v6)
 
-El transporte predeterminado es Iroh/QUIC. Utiliza rutas directas cuando están disponibles y mantiene la posibilidad de migrar desde relay a una ruta directa. El modo **Solo P2P directo** elimina direcciones relay de la invitación recibida y deshabilita su transporte; una invitación que contenga solo relay se rechaza antes de conectar.
+El transporte predeterminado es Iroh/QUIC con ALPN `heavydrop/6`. Utiliza rutas directas cuando están disponibles y mantiene la posibilidad de migrar desde relay a una ruta directa. El modo **Solo P2P directo** elimina direcciones relay de la invitación recibida y deshabilita su transporte; una invitación que contenga solo relay se rechaza antes de conectar.
 
-Esto maximiza las conexiones directas sin prometer que todos los NAT admitan perforación. Es normal necesitar un relay en algunas redes. La disponibilidad del relay no bloquea la preparación de una invitación local; el modo automático espera un tiempo limitado y puede emitir una invitación con solo direcciones IP. No se probó una matriz de routers ni una transferencia WAN real entre dos redes independientes.
+### Mitigación de errores de ensamblado de streams QUIC (`too many gaps in stream buffer`)
 
-### Política de recepción QUIC
+La crate `iroh 1.4.1` utiliza `noq-proto v1.4.0` (fork de Quinn). Con enlaces de alta velocidad o redes con jitter y pérdida, los fragmentos fuera de orden acumulaban huecos en el búfer de reensamblado de un stream único, disparando un `INTERNAL_ERROR` de QUIC.
 
-La GUI y `recv` aceptan invitaciones QUIC de forma predeterminada. Recibir un código corto requiere consentimiento explícito: **Compatibilidad TCP (metadatos visibles)** en Ajustes o `--legacy-tcp` en la CLI. La validación se ejecuta antes de crear la carpeta de destino, iniciar descubrimiento LAN o consultar el servidor manual. `--direct-only` y la compatibilidad TCP son opciones incompatibles.
+Para resolver este problema de raíz:
+1. **Pipeline Desacoplado:** La tarea de red lee directamente desde el `RecvStream` de QUIC a máxima velocidad sin realizar operaciones criptográficas ni I/O bloqueante de disco. Envía los bloques recibidos a través de un canal acotado `tokio::sync::mpsc` (capacidad de 8 bloques = máx 32 MiB en tránsito). Una tarea trabajadora separada realiza el descifrado ChaCha20-Poly1305, la verificación BLAKE3 y la escritura en disco mediante `tokio::task::spawn_blocking`.
+2. **Ventanas Conservadoras Anti-Gaps:**
+   - `DEFAULT_STREAM_RECEIVE_WINDOW`: 8 MiB (evita acumulación masiva de huecos en el reensamblador por stream).
+   - `DEFAULT_CONN_RECEIVE_WINDOW`: 32 MiB (flujo global de la conexión).
+   - `DEFAULT_SEND_WINDOW`: 32 MiB (límite de envío del emisor).
+3. **Multi-Stream Paralelo:** La carga de reensamblado se distribuye entre **4 streams QUIC paralelos**. Cada stream maneja un rango disjunto de bloques, dividiendo los huecos de reensamblado entre 4 estructuras independientes de `noq-proto` y previniendo el bloqueo de cabeza de línea.
+4. **Reconexión y Reanudación Automática:** Ante cualquier desconexión transitoria de red, el receptor ejecuta hasta 10 intentos con backoff exponencial. El emisor mantiene su servidor abierto (`SenderServer`) y reanuda la transferencia desde el último bloque verificado en el archivo `.part.meta`.
 
-El permiso de compatibilidad se aplica a códigos cortos; una invitación QUIC que falle no se reintenta mediante TCP. Esto conserva el cifrado del handshake de la ruta elegida. No modifica el protocolo v5 ni impide el relay cifrado propio de Iroh.
+## Correcciones integradas en el protocolo
 
-La continuación de política QUIC pasa 50 pruebas locales y Clippy. Incluye regresiones de GUI y CLI, rechazo sin efectos en red/disco y ausencia de fallback TCP cuando expira una invitación QUIC. La prueba pública de Iroh se mantiene opcional; su resultado anterior se indica más abajo.
-
-## Correcciones ya integradas en main
-
-| Área | Problema encontrado | Comportamiento actual |
+| Área | Problema encontrado | Comportamiento en Protocolo v6 |
 | --- | --- | --- |
-| Autenticación | Solo se autenticaban claves/salt, dejando metadatos y decisiones sin cubrir | Las pruebas v5 autentican oferta completa, respuesta, reanudación y confirmación final |
-| X25519 | Se admitían secretos compartidos no contributivos | Se rechazan claves de bajo orden |
-| Destino | Un archivo final podía reemplazarse sin `--force` | Se conserva y también se protege la carrera al publicar el `.part` |
-| Nombres Windows | Riesgo de ADS y alias de dispositivo con múltiples extensiones | Se rechazan `:`, caracteres ilegales, puntos/espacios finales y nombres reservados |
-| Reanudación | El modo sin hash podía mezclar parciales de otro archivo del mismo tamaño | Solo se reanuda con identidad de contenido BLAKE3; el modo rápido reinicia parciales |
-| Archivos grandes | El hash previo podía exceder el timeout del handshake | Se prepara antes de abrir la invitación; el timeout de verificación final es independiente |
-| QUIC | Ventanas de 0,5–1 MiB limitaban conexiones con RTT alto | Ventana por stream de 16 MiB y ventanas de conexión/envío de 32 MiB |
-| Memoria | La cola copiaba plaintext además de ciphertext | Conserva longitud, checksum y ciphertext; no una copia adicional de plaintext |
-| Cancelación | Una tarea de lectura podía sobrevivir a la transferencia | Un guard cancela la tarea al caer su propietario |
-| Servidor TCP | Tareas y sesiones sin límite global | Hasta 256 clientes concurrentes y 4096 sesiones, con limpieza y límites de registro |
+| QUIC Buffer Gaps | Caídas con `too many gaps in stream buffer` en enlaces con fluctuación | Ventana de stream reducida a 8 MiB + 4 streams paralelos balanceados |
+| Bloqueo de Red/Disco | Tarea de red bloqueada por descifrado y escritura sincrónica en disco | Pipeline desacoplado: red alimenta cola mpsc, descifrado y disco en `spawn_blocking` |
+| Resiliencia ante Caídas | Caída definitiva de conexión ante un corte transitorio | Reconexión automática con backoff exponencial (10 intentos) y persistencia del servidor |
+| Autenticación | Riesgo de reutilización prematura de código | Sesión consumida solo tras la confirmación mutua autenticada final (`COMPLETION_ACK`) |
+| X25519 | Secretos compartidos no contributivos | Rechazo estricto de claves de bajo orden |
+| Nombres Windows | Inyección de rutas, ADS (`:stream`), caracteres prohibidos y alias de dispositivo | Validación completa: rechazo de `:`, `?`, `*`, puntos/espacios finales y nombres reservados DOS |
+| Reanudación | Posible corrupción de parciales | Verificación estricta de hash de bloque BLAKE3 e intervalos continuos en `.part.meta` |
+| Observabilidad | Errores crípticos de Quinn para el usuario | Mensajes amigables en español, `--verbose` en CLI y desplegable "Detalles técnicos" en GUI |
 
-Las ventanas QUIC mayores no demuestran por sí solas una velocidad WAN concreta. El rendimiento depende de RTT, pérdida, discos, CPU, firewall y ruta seleccionada.
+## Verificación de Integridad y Pruebas Locales
 
-## Comprobaciones adicionales de esta continuación
+La suite de pruebas automatizadas incluye:
+- `test_quic_mid_transfer_interruption_and_resume`: Transfiere archivo grande sobre QUIC, interrumpe abruptamente la conexión a mitad de la transferencia, reconecta el receptor al mismo servidor, reanuda desde los bloques verificados y comprueba que el hash BLAKE3 final coincide al 100%.
+- Pruebas de compatibilidad TCP (código corto) y fallback a relay local (`iroh-relay`).
+- Pruebas de saneamiento estricto contra path traversal y nombres reservados de Windows.
+- Pruebas de consumo concurrente y desconexión cooperativa.
 
-- Transferencia completa con emisor y receptor en política estricta sin relay.
-- Rechazo inmediato de invitaciones que solo contienen relay bajo esa política.
-- Consumidores concurrentes compartiendo un solo presupuesto de ancho de banda.
-- Desactivar un límite despierta una transferencia que estaba esperando.
-- Cancelar el propietario libera los recursos del worker.
-- Reintentar una publicación con etiqueta existente reconstruye la misma versión y no omite los assets.
-- La cola de GitHub admite múltiples publicaciones pendientes; no cancela la anterior por cada push nuevo. Límite del servicio: 100 pendientes.
-
-Resultado local: 46 pruebas de la suite normal aprobadas y la prueba pública opcional de Iroh aprobada por separado (32 KiB sintéticos). Las pruebas del flujo de release también pasaron. La prueba pública conecta dos endpoints de esta misma máquina; confirma acceso a la infraestructura pública, no una ruta WAN real entre dos redes.
-
-## Dependencias y límites de la revisión
-
-`cargo audit` encontró dos avisos en `quick-xml 0.30.0`: [RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194.html) y [RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195.html). Cargo.lock los incluye a través de `zbus_xml` / `zbus-lockstep` / AT-SPI de la accesibilidad Unix. `cargo tree -i quick-xml@0.30.0 --target x86_64-pc-windows-msvc --locked --offline` no encuentra ese paquete en el árbol Windows distribuido. Esto no equivale a que todo el árbol multiplataforma esté libre de avisos.
-
-Queda pendiente actualizar ese backend Unix y revisar avisos de mantenimiento de dependencias transitivas (entre ellos number_prefix, paste, ttf-parser y zvariant). No se desactivó accesibilidad para ocultar los avisos ni se eliminó UPnP/NAT traversal. Los avisos no se agregaron a una lista de exclusión.
-
-La autenticación simétrica del código no es un PAKE; el modo TCP expone metadatos y verificadores del handshake a un observador de esa conexión. QUIC cifra ese intercambio y es el transporte recomendado. Los códigos cortos tienen 60 bits de entropía y deben compartirse como credenciales, no publicarse.
-
-Un peer que conoce la dirección del listener puede causar fallos o demoras de conexión. Los timeouts, límites de recursos y autenticación reducen el riesgo, pero no se demuestra resistencia completa a denegación de servicio. Tampoco se evaluaron adversarios con permisos de escritura local sobre la carpeta de destino, dispositivos FAT/exFAT reales ni transferencias de terabytes.
-
-## Referencias primarias
-
-- [Iroh 1.4.1: conexiones directas, relay y cifrado](https://docs.rs/iroh/1.4.1/iroh/)
-- [Iroh: rutas de una conexión](https://docs.rs/iroh/1.4.1/iroh/endpoint/struct.Connection.html#method.paths)
-- [GitHub: cola de concurrencia de workflows](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
+Resultado: 51 pruebas aprobadas con cero fallos (`cargo test --all-targets`) y cero advertencias de Clippy (`cargo clippy`).

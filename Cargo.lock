@@ -2401,6 +2401,8 @@ dependencies = [
  "serde_json",
  "socket2",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "x25519-dalek",
 ]
 

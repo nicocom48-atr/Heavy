@@ -201,6 +201,7 @@ async fn test_part_file_resume_and_metadata() {
         chunk_size: 256 * 1024, // 256 KB
         file_hash: "dummyhash".to_string(),
         sender_auth_proof: [0u8; 32],
+        parallel_streams: 1,
     };
 
     // 1. Initial preparation (0 bytes downloaded)
@@ -462,6 +463,7 @@ async fn test_wrong_code_mutual_authentication_failure() {
         resume_offset: 0,
         receiver_auth_proof: [0; 32],
         message: None,
+        parallel_streams: 1,
     };
     resp.receiver_auth_proof = response_proof(&offer, &resp, &wrong_code.derive_auth_key()).unwrap();
     send_handshake_response(&mut stream, &resp).await.unwrap();

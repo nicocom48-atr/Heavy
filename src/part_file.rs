@@ -16,6 +16,27 @@ pub struct PartMetadata {
     pub file_hash: String,
     pub verified_bytes: u64,
     pub last_chunk_hash: [u8; 32],
+    #[serde(default)]
+    pub verified_ranges: Vec<(u64, u64)>,
+}
+
+pub fn add_verified_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
+    if start >= end {
+        return;
+    }
+    ranges.push((start, end));
+    ranges.sort_unstable_by_key(|r| r.0);
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (s, e) in ranges.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+    *ranges = merged;
 }
 
 pub enum PrepareResult {
@@ -72,9 +93,10 @@ impl PartFileManager {
         // 2. Check for verifiable .part and .part.meta
         let mut resume_offset = 0u64;
         let mut last_chunk_hash = [0u8; 32];
+        let mut existing_ranges = Vec::new();
 
         if !force && offer.file_hash != "UNVERIFIED_PREHASH" && part_path.exists()
-            && tokio::fs::metadata(&meta_path).await.is_ok_and(|m| m.len() <= 16 * 1024) {
+            && tokio::fs::metadata(&meta_path).await.is_ok_and(|m| m.len() <= 32 * 1024) {
             if let Ok(meta_bytes) = tokio::fs::read(&meta_path).await {
                 if let Ok(meta) = serde_json::from_slice::<PartMetadata>(&meta_bytes) {
                     // Check if metadata matches current transfer
@@ -85,19 +107,26 @@ impl PartFileManager {
                         && (offer.file_hash == "UNVERIFIED_PREHASH"
                             || meta.file_hash.eq_ignore_ascii_case(&offer.file_hash));
 
-                    if matches && meta.verified_bytes > 0 && meta.verified_bytes <= offer.file_size
-                        && (meta.verified_bytes == offer.file_size || meta.verified_bytes % offer.chunk_size as u64 == 0)
-                    {
+                    if matches && meta.verified_bytes > 0 && meta.verified_bytes <= offer.file_size {
                         let actual_len = tokio::fs::metadata(&part_path).await?.len();
-                        if actual_len >= meta.verified_bytes {
-                            // Verify integrity of the last verified chunk on disk before accepting resume
+                        let max_end = meta.verified_ranges.iter().map(|(_, e)| *e).max().unwrap_or(meta.verified_bytes);
+
+                        if actual_len >= max_end {
+                            // Check contiguous beginning range
+                            let contiguous_start = if !meta.verified_ranges.is_empty() {
+                                meta.verified_ranges.first().map(|(s, e)| if *s == 0 { *e } else { 0 }).unwrap_or(0)
+                            } else {
+                                meta.verified_bytes
+                            };
+
                             let chunk_size = meta.chunk_size as u64;
-                            let last_chunk_len = if meta.verified_bytes % chunk_size == 0 {
+                            let verify_target = if contiguous_start > 0 { contiguous_start } else { meta.verified_bytes };
+                            let last_chunk_len = if verify_target % chunk_size == 0 {
                                 chunk_size
                             } else {
-                                meta.verified_bytes % chunk_size
+                                verify_target % chunk_size
                             };
-                            let last_chunk_start = meta.verified_bytes - last_chunk_len;
+                            let last_chunk_start = verify_target.saturating_sub(last_chunk_len);
 
                             if let Ok(mut verify_file) = File::open(&part_path).await {
                                 if verify_file
@@ -109,8 +138,13 @@ impl PartFileManager {
                                     if verify_file.read_exact(&mut chunk_buf).await.is_ok() {
                                         let check = blake3::hash(&chunk_buf);
                                         if check.as_bytes() == &meta.last_chunk_hash {
-                                            resume_offset = meta.verified_bytes;
+                                            resume_offset = contiguous_start;
                                             last_chunk_hash = meta.last_chunk_hash;
+                                            existing_ranges = if !meta.verified_ranges.is_empty() {
+                                                meta.verified_ranges
+                                            } else {
+                                                vec![(0, resume_offset)]
+                                            };
                                         }
                                     }
                                 }
@@ -123,17 +157,21 @@ impl PartFileManager {
 
         // 3. Open .part file for writing
         let mut file = OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
-            .truncate(resume_offset == 0)
+            .truncate(resume_offset == 0 && existing_ranges.is_empty())
             .open(&part_path)
             .await
             .with_context(|| format!("Failed to open partial file {}", part_path.display()))?;
 
-        if resume_offset > 0 {
+        if resume_offset > 0 && existing_ranges.is_empty() {
             file.seek(SeekFrom::Start(resume_offset)).await?;
             file.set_len(resume_offset).await?;
+            existing_ranges.push((0, resume_offset));
         }
+
+        let verified_bytes = existing_ranges.iter().map(|(s, e)| e - s).sum();
 
         let metadata = PartMetadata {
             protocol_version: PROTOCOL_VERSION,
@@ -141,8 +179,9 @@ impl PartFileManager {
             file_size: offer.file_size,
             chunk_size: offer.chunk_size,
             file_hash: offer.file_hash.clone(),
-            verified_bytes: resume_offset,
+            verified_bytes,
             last_chunk_hash,
+            verified_ranges: existing_ranges,
         };
 
         let part_manager = PartFileManager {
@@ -167,14 +206,22 @@ impl PartFileManager {
         data: &[u8],
         chunk_hash: [u8; 32],
     ) -> Result<()> {
-        if offset != self.metadata.verified_bytes || data.len() as u64 > self.metadata.file_size.saturating_sub(offset) {
-            bail!("Bloque fuera de orden o fuera de los límites del archivo");
+        let len = data.len() as u64;
+        if offset + len > self.metadata.file_size {
+            bail!("Bloque fuera de los límites del archivo (offset {} + len {} > {})", offset, len, self.metadata.file_size);
         }
+
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .await
+            .context("Failed to seek partial file")?;
         self.file
             .write_all(data)
             .await
             .context("Failed to write chunk to disk")?;
-        self.metadata.verified_bytes += data.len() as u64;
+
+        add_verified_range(&mut self.metadata.verified_ranges, offset, offset + len);
+        self.metadata.verified_bytes = self.metadata.verified_ranges.iter().map(|(s, e)| e - s).sum();
         self.metadata.last_chunk_hash = chunk_hash;
 
         let json = serde_json::to_vec(&self.metadata)?;
@@ -191,7 +238,7 @@ impl PartFileManager {
             .flush()
             .await
             .context("Failed to flush file to disk")?;
-        if self.metadata.verified_bytes != self.metadata.file_size || self.file.metadata().await?.len() != self.metadata.file_size {
+        if self.metadata.verified_bytes != self.metadata.file_size || self.file.metadata().await?.len() < self.metadata.file_size {
             bail!("No se puede finalizar un archivo incompleto");
         }
         self.file
@@ -233,9 +280,11 @@ async fn publish_file(source: &Path, target: &Path, overwrite: bool) -> std::io:
 
 #[cfg(not(target_os = "windows"))]
 async fn publish_file(source: &Path, target: &Path, overwrite: bool) -> std::io::Result<()> {
-    if overwrite { tokio::fs::rename(source, target).await }
-    else {
-        tokio::fs::hard_link(source, target).await?;
-        tokio::fs::remove_file(source).await
+    if target.exists() && !overwrite {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "Target file already exists",
+        ));
     }
+    tokio::fs::rename(source, target).await
 }

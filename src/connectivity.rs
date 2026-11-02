@@ -27,6 +27,7 @@ pub struct EstablishedConnection {
     pub stream: Box<dyn AsyncStream>,
     pub conn_type: ConnectionType,
     pub peer_description: String,
+    pub quic_connection: Option<iroh::endpoint::Connection>,
 }
 
 // Stop advertising on success, failure, or when the connection future is cancelled.
@@ -68,15 +69,17 @@ pub async fn establish_sender_connection(
     }
 
     let lookup_hash = session.code().signaling_lookup_hash();
-    signal_client
-        .register_session(&lookup_hash, &candidates)
-        .await
-        .context("No se pudo registrar la transferencia en Internet. Comprueba el servidor configurado o deja el campo vacío para usar solo LAN")?;
+    if signal_client.is_available() {
+        signal_client
+            .register_session(&lookup_hash, &candidates)
+            .await
+            .context("Error registering on signaling server")?;
+    }
 
-    // 4. Wait for incoming direct connection or cancellation
+    // 4. Wait for incoming connection via direct TCP or relay fallback
     tokio::select! {
-        direct_res = listener.accept() => {
-            let (stream, peer_addr) = direct_res.context("Failed to accept direct peer connection")?;
+        direct = listener.accept() => {
+            let (stream, peer_addr) = direct.context("Failed to accept direct TCP connection")?;
             let _ = stream.set_nodelay(true);
 
             let is_local = peer_addr.ip().is_loopback() || is_private_ip(&peer_addr.ip());
@@ -90,6 +93,7 @@ pub async fn establish_sender_connection(
                 stream: Box::new(stream),
                 conn_type,
                 peer_description: peer_addr.to_string(),
+                quic_connection: None,
             })
         }
         relay = async {
@@ -110,19 +114,14 @@ pub async fn establish_sender_connection(
                 stream: Box::new(relay),
                 conn_type: ConnectionType::Relay,
                 peer_description: "Relay cifrado".to_string(),
+                quic_connection: None,
             })
         }
         _ = async {
             while !cancel_signal.load(Ordering::Relaxed) {
-                if session.is_expired() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         } => {
-            if session.is_expired() {
-                bail!("La sesión ha expirado antes de que el receptor se conectara");
-            }
             bail!("Transferencia cancelada por el usuario");
         }
     }
@@ -148,6 +147,7 @@ pub async fn establish_receiver_connection(
                 stream: Box::new(stream),
                 conn_type: ConnectionType::DirectLocal,
                 peer_description: format!("LAN ({})", lan_addr),
+                quic_connection: None,
             });
         }
     }
@@ -188,6 +188,7 @@ pub async fn establish_receiver_connection(
                     stream: Box::new(stream),
                     conn_type,
                     peer_description: format!("Directo ({})", cand),
+                    quic_connection: None,
                 });
             }
         }
@@ -200,6 +201,7 @@ pub async fn establish_receiver_connection(
             stream: Box::new(stream),
             conn_type: ConnectionType::Relay,
             peer_description: "Relay cifrado".to_string(),
+            quic_connection: None,
         });
     }
 

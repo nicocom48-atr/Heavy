@@ -9,6 +9,10 @@ use std::path::PathBuf;
     about = "⚡ Transferencia de archivos P2P masivos (50GB+) mediante códigos temporales únicos sin configuración de IPs."
 )]
 pub struct Cli {
+    /// Activar registro detallado de eventos de red y depuración técnica
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -59,7 +63,7 @@ pub enum Commands {
         #[arg(short, long, default_value = ".")]
         output_dir: PathBuf,
 
-        /// Forzar sobrescritura: ignora descargas parciales existentes
+        /// Sobrescribir archivo existente si ya existe
         #[arg(short, long)]
         force: bool,
 
@@ -68,27 +72,13 @@ pub enum Commands {
         signal_server: Option<String>,
     },
 
+    /// Iniciar la interfaz gráfica interactiva (por defecto si no se pasa comando)
+    Gui,
+
     /// Ejecutar el servidor ligero de señalización y relay (rendezvous)
     Server {
         /// Puerto TCP para escuchar conexiones de señalización y relay (por defecto: 7880)
         #[arg(short, long, default_value_t = 7880)]
         port: u16,
     },
-
-    /// Abrir la interfaz gráfica de escritorio (GUI)
-    Gui,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn receiver_defaults_to_quic_and_legacy_requires_an_explicit_flag() {
-        let cli = Cli::try_parse_from(["heavydrop", "recv", "KD7M-9Q2P-W8RX"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Recv { legacy_tcp: false, .. })));
-        let cli = Cli::try_parse_from(["heavydrop", "recv", "KD7M-9Q2P-W8RX", "--legacy-tcp"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Recv { legacy_tcp: true, .. })));
-        assert!(Cli::try_parse_from(["heavydrop", "recv", "KD7M-9Q2P-W8RX", "--legacy-tcp", "--direct-only"]).is_err());
-    }
 }

@@ -8,9 +8,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-pub const PROTOCOL_VERSION: u32 = 5;
-pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP05";
-pub const COMPLETION_ACK: &[u8; 8] = b"HVDONE05";
+pub const PROTOCOL_VERSION: u32 = 6;
+pub const MAGIC_BYTES: &[u8; 8] = b"HVDROP06";
+pub const COMPLETION_ACK: &[u8; 8] = b"HVDONE06";
 pub const MIN_CHUNK_SIZE: u32 = 64 * 1024; // 64 KB
 pub const MAX_CHUNK_SIZE: u32 = 64 * 1024 * 1024; // 64 MB
 pub const DEFAULT_CHUNK_SIZE: u32 = 4 * 1024 * 1024; // 4 MB chunk size for high-throughput 50GB transfers
@@ -20,6 +20,16 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 pub const CHUNK_TIMEOUT: Duration = Duration::from_secs(45);
 // A large file's final disk verification can take much longer than a network block.
 pub const FINALIZATION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+// Configurable transport & parallel stream constants
+pub const DEFAULT_PARALLEL_STREAMS: u32 = 4;
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;  // 8 MiB per stream (anti-gap threshold)
+pub const DEFAULT_CONN_RECEIVE_WINDOW: u32 = 32 * 1024 * 1024;   // 32 MiB total connection
+pub const DEFAULT_SEND_WINDOW: u64 = 32 * 1024 * 1024;          // 32 MiB send window
+
+pub fn default_parallel_streams() -> u32 {
+    1
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HandshakeOffer {
@@ -32,6 +42,8 @@ pub struct HandshakeOffer {
     pub chunk_size: u32,
     pub file_hash: String,
     pub sender_auth_proof: [u8; 32],
+    #[serde(default = "default_parallel_streams")]
+    pub parallel_streams: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -42,6 +54,39 @@ pub struct HandshakeResponse {
     pub resume_offset: u64,
     pub receiver_auth_proof: [u8; 32],
     pub message: Option<String>,
+    #[serde(default = "default_parallel_streams")]
+    pub parallel_streams: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StreamRangeRequest {
+    pub stream_index: u32,
+    pub start_offset: u64,
+    pub end_offset: u64,
+}
+
+pub async fn send_stream_range_request<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    request: &StreamRangeRequest,
+) -> Result<()> {
+    let json_bytes = serde_json::to_vec(request)?;
+    writer.write_u32(json_bytes.len() as u32).await?;
+    writer.write_all(&json_bytes).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+pub async fn receive_stream_range_request<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<StreamRangeRequest> {
+    let len = reader.read_u32().await?;
+    if len > 4096 {
+        bail!("Stream range request payload unexpectedly large ({} bytes)", len);
+    }
+    let mut buf = vec![0u8; len as usize];
+    reader.read_exact(&mut buf).await?;
+    let req: StreamRangeRequest = serde_json::from_slice(&buf)?;
+    Ok(req)
 }
 
 /// Authenticate the complete offer, including the destination name and file boundaries.
@@ -49,7 +94,7 @@ pub fn offer_proof(offer: &HandshakeOffer, auth_key: &[u8; 32]) -> Result<[u8; 3
     let mut authenticated = offer.clone();
     authenticated.sender_auth_proof = [0; 32];
     let mut mac = blake3::Hasher::new_keyed(auth_key);
-    mac.update(b"heavydrop-v5-offer");
+    mac.update(b"heavydrop-v6-offer");
     mac.update(&serde_json::to_vec(&authenticated)?);
     Ok(*mac.finalize().as_bytes())
 }
@@ -59,7 +104,7 @@ pub fn response_proof(offer: &HandshakeOffer, response: &HandshakeResponse, auth
     let mut authenticated = response.clone();
     authenticated.receiver_auth_proof = [0; 32];
     let mut mac = blake3::Hasher::new_keyed(auth_key);
-    mac.update(b"heavydrop-v5-response");
+    mac.update(b"heavydrop-v6-response");
     mac.update(&offer_proof(offer, auth_key)?);
     mac.update(&serde_json::to_vec(&authenticated)?);
     Ok(*mac.finalize().as_bytes())
@@ -67,7 +112,7 @@ pub fn response_proof(offer: &HandshakeOffer, response: &HandshakeResponse, auth
 
 pub fn completion_proof(offer: &HandshakeOffer, response: &HandshakeResponse, auth_key: &[u8; 32]) -> Result<[u8; 32]> {
     let mut mac = blake3::Hasher::new_keyed(auth_key);
-    mac.update(b"heavydrop-v5-completion");
+    mac.update(b"heavydrop-v6-completion");
     mac.update(&response_proof(offer, response, auth_key)?);
     Ok(*mac.finalize().as_bytes())
 }
@@ -111,7 +156,7 @@ pub fn derive_session_cipher(
     ikm.extend_from_slice(shared.as_bytes());
     ikm.extend_from_slice(auth_key);
     ikm.extend_from_slice(session_salt);
-    let key_bytes = blake3::derive_key("heavydrop-v3-transport-key", &ikm);
+    let key_bytes = blake3::derive_key("heavydrop-v6-transport-key", &ikm);
     Ok(ChaCha20Poly1305::new((&key_bytes).into()))
 }
 
@@ -122,85 +167,95 @@ pub fn encrypt_chunk(
     chunk_index: u64,
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[0] = 0x01; // sender->receiver direction
-    nonce_bytes[1..4].copy_from_slice(&session_salt[0..3]);
-    nonce_bytes[4..12].copy_from_slice(&chunk_index.to_be_bytes());
-    let nonce = (&nonce_bytes).into();
+    let nonce = derive_chunk_nonce(session_salt, chunk_index, false);
     cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| anyhow::anyhow!("Encryption error: {}", e))
+        .encrypt(&nonce.into(), plaintext)
+        .map_err(|e| anyhow::anyhow!("AEAD encryption failed for chunk {}: {}", chunk_index, e))
 }
 
-/// Decrypt a chunk payload using ChaCha20-Poly1305 AEAD and verify Poly1305 MAC tag
+/// Decrypt a chunk payload using ChaCha20-Poly1305 AEAD with direction and session salt nonce isolation
 pub fn decrypt_chunk(
     cipher: &ChaCha20Poly1305,
     session_salt: &[u8; 32],
     chunk_index: u64,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[0] = 0x01; // sender->receiver direction
-    nonce_bytes[1..4].copy_from_slice(&session_salt[0..3]);
-    nonce_bytes[4..12].copy_from_slice(&chunk_index.to_be_bytes());
-    let nonce = (&nonce_bytes).into();
+    let nonce = derive_chunk_nonce(session_salt, chunk_index, false);
     cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| anyhow::anyhow!("Decryption / AEAD authentication tag failure: {}", e))
+        .decrypt(&nonce.into(), ciphertext)
+        .map_err(|e| anyhow::anyhow!("AEAD decryption failed for chunk {}: {}", chunk_index, e))
 }
 
-/// Verify mutual authentication proof in constant time
-pub fn verify_proof_constant_time(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
-    constant_time_eq::constant_time_eq(expected, actual)
+/// Derive a unique 96-bit nonce per chunk using BLAKE3 KDF and session salt
+fn derive_chunk_nonce(session_salt: &[u8; 32], chunk_index: u64, from_receiver: bool) -> [u8; 12] {
+    let mut material = Vec::with_capacity(32 + 8 + 1);
+    material.extend_from_slice(session_salt);
+    material.extend_from_slice(&chunk_index.to_be_bytes());
+    material.push(if from_receiver { 1 } else { 0 });
+
+    let hash = blake3::hash(&material);
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&hash.as_bytes()[0..12]);
+    nonce
 }
 
-/// Sanitize file name to strictly prevent directory traversal, illegal chars, and Windows device names
-pub fn sanitize_file_name(raw: &str) -> Result<String> {
-    if raw.chars().any(|c| c.is_control()) {
-        bail!("File name contains invalid control characters");
+/// Verify receiver auth proof against expected proof using constant time equality
+pub fn verify_proof_constant_time(expected: &[u8; 32], received: &[u8; 32]) -> bool {
+    constant_time_eq::constant_time_eq_32(expected, received)
+}
+
+/// Strict filename sanitization preventing path traversal and reserved Windows device names
+pub fn sanitize_file_name(raw_name: &str) -> Result<String> {
+    if raw_name.trim().is_empty() {
+        bail!("File name cannot be empty");
     }
 
-    let path = std::path::Path::new(raw);
-    let base_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|s| !s.is_empty())
-        .context("File name is invalid or empty")?;
-
-    if base_name == "." || base_name == ".." || base_name.contains('/') || base_name.contains('\\')
-    {
-        bail!(
-            "File name contains illegal path traversal components: {}",
-            raw
-        );
+    if raw_name.contains('\0') {
+        bail!("File name contains null byte");
     }
 
-    if base_name.chars().any(|c| "<>:\"|?*".contains(c))
-        || base_name.ends_with('.') || base_name.ends_with(' ')
-    {
-        bail!("File name contains illegal Windows characters or a trailing dot/space");
+    if raw_name.ends_with('.') || raw_name.ends_with(' ') {
+        bail!("File name cannot end with dot or space");
     }
 
-    let stem = base_name.split('.').next().unwrap_or(base_name).trim_end()
-        .to_ascii_uppercase();
+    let p = std::path::Path::new(raw_name);
+    let file_name_os = match p.file_name() {
+        Some(name) => name,
+        None => bail!("Invalid path: no file name component found"),
+    };
 
-    const RESERVED_NAMES: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    let sanitized = file_name_os.to_string_lossy().to_string();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        bail!("Illegal file name '{}'", raw_name);
+    }
+
+    if sanitized.ends_with('.') || sanitized.ends_with(' ') {
+        bail!("File name cannot end with dot or space");
+    }
+
+    if sanitized.chars().any(|c| matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')) {
+        bail!("File name contains invalid character");
+    }
+
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
 
-    if RESERVED_NAMES.contains(&stem.as_str()) {
-        bail!(
-            "File name uses a reserved system device name: {}",
-            base_name
-        );
+    let base_name = sanitized.split('.').next().unwrap_or(&sanitized);
+    let upper_base = base_name.to_uppercase();
+
+    for r in &reserved {
+        if upper_base == *r {
+            bail!("File name '{}' uses a reserved Windows device name", raw_name);
+        }
     }
 
-    if base_name.len() > 255 {
+    if sanitized.len() > 255 {
         bail!("File name exceeds maximum allowed length of 255 characters");
     }
 
-    Ok(base_name.to_string())
+    Ok(sanitized)
 }
 
 /// Send handshake offer over the network
@@ -356,7 +411,6 @@ pub async fn send_prepared_chunk<W: AsyncWriteExt + Unpin>(
     checksum: &[u8; 32],
     ciphertext: &[u8],
 ) -> Result<()> {
-
     let mut header = [0u8; 44];
     header[0..8].copy_from_slice(&offset.to_be_bytes());
     header[8..12].copy_from_slice(&(ciphertext.len() as u32).to_be_bytes());
@@ -466,4 +520,3 @@ mod tests {
         assert!(sanitize_file_name("evil\0file.txt").is_err());
     }
 }
-

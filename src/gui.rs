@@ -839,8 +839,53 @@ fn note(ui: &mut egui::Ui, text: impl Into<String>) {
     ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(MUTED)).wrap());
 }
 
+fn parse_friendly_error(text: &str) -> (String, Option<String>) {
+    let lower = text.to_lowercase();
+    if lower.contains("too many gaps in stream buffer") {
+        (
+            "Fallo de transporte QUIC: saturaciÃ³n de fragmentos de red. HeavyDrop optimizÃ³ los bÃºferes y reintentarÃ¡ automÃ¡ticamente.".to_string(),
+            Some(text.to_string()),
+        )
+    } else if lower.contains("connection lost") || lower.contains("aborted by peer") {
+        (
+            "ConexiÃ³n perdida con el interlocutor. Reanudando desde el Ãºltimo bloque verificado...".to_string(),
+            Some(text.to_string()),
+        )
+    } else if lower.contains("autenticaciÃ³n") || lower.contains("cÃ³digo incorrecto") {
+        (
+            "Error de autenticaciÃ³n: la clave de sesiÃ³n o invitaciÃ³n no coincide.".to_string(),
+            Some(text.to_string()),
+        )
+    } else if lower.contains("cancelada por el usuario") {
+        ("Transferencia cancelada.".to_string(), None)
+    } else if lower.contains("ya existe") {
+        (
+            "El archivo ya existe en destino. ActivÃ¡ 'Sobrescribir' o seleccionÃ¡ otra carpeta.".to_string(),
+            None,
+        )
+    } else if lower.contains("integridad") {
+        (
+            "Fallo en la verificaciÃ³n de integridad criptogrÃ¡fica de los datos recibidos.".to_string(),
+            Some(text.to_string()),
+        )
+    } else if text.len() > 80 || lower.contains("error:") || lower.contains("failed") {
+        (
+            "OcurriÃ³ un error en la transferencia.".to_string(),
+            Some(text.to_string()),
+        )
+    } else {
+        (text.to_string(), None)
+    }
+}
+
 fn error_message(ui: &mut egui::Ui, text: &str) {
-    ui.add(egui::Label::new(egui::RichText::new(text).color(RED)).wrap());
+    let (friendly, technical) = parse_friendly_error(text);
+    ui.add(egui::Label::new(egui::RichText::new(&friendly).color(RED).strong()).wrap());
+    if let Some(tech) = technical {
+        ui.collapsing("Detalles tÃ©cnicos", |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(tech).monospace().size(11.0).color(MUTED)).wrap());
+        });
+    }
 }
 
 fn primary_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {

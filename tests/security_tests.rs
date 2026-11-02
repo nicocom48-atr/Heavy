@@ -2,10 +2,16 @@ use heavydrop::{part_file::{PartFileManager, PrepareResult}, protocol::*};
 
 fn offer() -> HandshakeOffer {
     HandshakeOffer {
-        protocol_version: PROTOCOL_VERSION, session_id: "security-test".into(),
-        sender_public_key: [7; 32], session_salt: [9; 32], file_name: "payload.bin".into(),
-        file_size: 64 * 1024, chunk_size: 64 * 1024, file_hash: "UNVERIFIED_PREHASH".into(),
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "security-test".into(),
+        sender_public_key: [7; 32],
+        session_salt: [9; 32],
+        file_name: "payload.bin".into(),
+        file_size: 64 * 1024,
+        chunk_size: 64 * 1024,
+        file_hash: "UNVERIFIED_PREHASH".into(),
         sender_auth_proof: [0; 32],
+        parallel_streams: 1,
     }
 }
 
@@ -27,8 +33,13 @@ fn authenticates_file_metadata_and_resume_decisions() {
         assert!(!verify_proof_constant_time(&original.sender_auth_proof, &offer_proof(&tampered, &key).unwrap()));
     }
     let mut response = HandshakeResponse {
-        protocol_version: PROTOCOL_VERSION, receiver_public_key: [11; 32], accepted: true,
-        resume_offset: 0, receiver_auth_proof: [0; 32], message: None,
+        protocol_version: PROTOCOL_VERSION,
+        receiver_public_key: [11; 32],
+        accepted: true,
+        resume_offset: 0,
+        receiver_auth_proof: [0; 32],
+        message: None,
+        parallel_streams: 1,
     };
     response.receiver_auth_proof = response_proof(&original, &response, &key).unwrap();
     let confirmation = completion_proof(&original, &response, &key).unwrap();
@@ -100,7 +111,8 @@ async fn incomplete_or_out_of_order_download_cannot_be_published() {
     let dir = Directory::new();
     let spec = offer();
     let mut manager = ready(&dir, &spec, false).await;
-    assert!(manager.write_verified_chunk(10, &[1; 10], [0; 32]).await.is_err());
+    // Attempting to write past file size must fail
+    assert!(manager.write_verified_chunk(spec.file_size + 10, &[1; 10], [0; 32]).await.is_err());
     assert!(manager.finalize().await.is_err());
     assert!(!dir.0.join("payload.bin").exists());
 }
