@@ -1,6 +1,7 @@
 use eframe::egui;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -54,6 +55,10 @@ pub struct HeavyDropApp {
     download_limiter: heavydrop::speed_limiter::SpeedLimiter,
     upload_limit_mb: u32,
     download_limit_mb: u32,
+
+    // Internet Speed Test
+    speedtest_state: Arc<parking_lot::Mutex<heavydrop::speedtest::SpeedTestPhase>>,
+    speedtest_cancel: Option<Arc<AtomicBool>>,
 
     history_expanded: bool,
 
@@ -115,6 +120,9 @@ impl HeavyDropApp {
             download_limiter,
             upload_limit_mb: 0,
             download_limit_mb: 0,
+
+            speedtest_state: Arc::new(parking_lot::Mutex::new(heavydrop::speedtest::SpeedTestPhase::Idle)),
+            speedtest_cancel: None,
 
             history_expanded: false,
 
@@ -1724,6 +1732,200 @@ impl HeavyDropApp {
         );
         ui.add_space(8.0);
         note(ui, "0 = sin límite · Cambios en tiempo real");
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("⚡ Test de Velocidad de Internet").size(15.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                note(ui, "Cloudflare Anycast");
+            });
+        });
+        ui.add_space(6.0);
+
+        let phase = self.speedtest_state.lock().clone();
+        match phase {
+            heavydrop::speedtest::SpeedTestPhase::Idle => {
+                note(
+                    ui,
+                    "Medí la velocidad real de tu conexión para auto-calibrar tus límites al 85%.",
+                );
+                ui.add_space(8.0);
+                if ui
+                    .button(
+                        egui::RichText::new("⚡ Iniciar Test de Velocidad")
+                            .color(ACCENT)
+                            .size(13.0)
+                            .strong(),
+                    )
+                    .clicked()
+                {
+                    self.start_speedtest();
+                }
+            }
+            heavydrop::speedtest::SpeedTestPhase::MeasuringPing => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new("Midiendo latencia (ping) a nodos Anycast...")
+                            .color(ACCENT)
+                            .size(13.0),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(egui::RichText::new("Cancelar").color(RED)).clicked() {
+                            self.cancel_speedtest();
+                        }
+                    });
+                });
+            }
+            heavydrop::speedtest::SpeedTestPhase::MeasuringDownload { progress, current_mbps } => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("📥 Medición de bajada:")
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{:.1} Mbps", current_mbps))
+                            .color(GREEN)
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(egui::RichText::new("Cancelar").color(RED)).clicked() {
+                            self.cancel_speedtest();
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                ui.add(egui::ProgressBar::new(progress).show_percentage());
+            }
+            heavydrop::speedtest::SpeedTestPhase::MeasuringUpload { progress, current_mbps } => {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("📤 Medición de subida:")
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{:.1} Mbps", current_mbps))
+                            .color(GREEN)
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(egui::RichText::new("Cancelar").color(RED)).clicked() {
+                            self.cancel_speedtest();
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                ui.add(egui::ProgressBar::new(progress).show_percentage());
+            }
+            heavydrop::speedtest::SpeedTestPhase::Completed(ref res) => {
+                let rec_up = res.recommended_upload_limit_mb();
+                let rec_down = res.recommended_download_limit_mb();
+
+                egui::Grid::new("speedtest_results_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Latencia (Ping):").size(12.0));
+                        ui.label(
+                            egui::RichText::new(format!("{:.1} ms", res.ping_ms))
+                                .color(GREEN)
+                                .strong(),
+                        );
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Bajada (Download):").size(12.0));
+                        ui.label(
+                            egui::RichText::new(format!("{:.1} Mbps ({:.2} MB/s)", res.download_mbps, res.download_mbs))
+                                .color(ACCENT)
+                                .strong(),
+                        );
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("Subida (Upload):").size(12.0));
+                        ui.label(
+                            egui::RichText::new(format!("{:.1} Mbps ({:.2} MB/s)", res.upload_mbps, res.upload_mbs))
+                                .color(ACCENT)
+                                .strong(),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.add_space(10.0);
+
+                let apply_label = format!(
+                    "🎯 Aplicar límites al 85% (Subida: {} MB/s | Bajada: {} MB/s)",
+                    rec_up, rec_down
+                );
+                if ui
+                    .button(
+                        egui::RichText::new(apply_label)
+                            .color(GREEN)
+                            .size(13.0)
+                            .strong(),
+                    )
+                    .clicked()
+                {
+                    self.upload_limit_mb = rec_up;
+                    self.download_limit_mb = rec_down;
+                    self.upload_limiter.set_limit_mbps(rec_up as u64);
+                    self.download_limiter.set_limit_mbps(rec_down as u64);
+                }
+
+                ui.add_space(4.0);
+                if ui
+                    .button(
+                        egui::RichText::new("⚡ Repetir prueba")
+                            .color(MUTED)
+                            .size(12.0),
+                    )
+                    .clicked()
+                {
+                    self.start_speedtest();
+                }
+            }
+            heavydrop::speedtest::SpeedTestPhase::Failed(ref err) => {
+                ui.label(
+                    egui::RichText::new(format!("Error en el test: {}", err))
+                        .color(RED)
+                        .size(12.0),
+                );
+                ui.add_space(6.0);
+                if ui
+                    .button(
+                        egui::RichText::new("⚡ Reintentar prueba")
+                            .color(ACCENT)
+                            .size(12.0),
+                    )
+                    .clicked()
+                {
+                    self.start_speedtest();
+                }
+            }
+        }
+    }
+
+    fn start_speedtest(&mut self) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.speedtest_cancel = Some(cancel.clone());
+        let state = self.speedtest_state.clone();
+        self.tokio_rt.spawn(async move {
+            heavydrop::speedtest::run_speed_test(state, cancel).await;
+        });
+    }
+
+    fn cancel_speedtest(&mut self) {
+        if let Some(ref cancel) = self.speedtest_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let mut state = self.speedtest_state.lock();
+        *state = heavydrop::speedtest::SpeedTestPhase::Idle;
     }
 }
 

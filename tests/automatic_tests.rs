@@ -95,6 +95,11 @@ async fn multi_stream_4mb_chunks_transfer_test() {
 }
 
 #[tokio::test]
+async fn multi_stream_uneven_last_chunk_transfer_test() {
+    transfer_with_chunk(TransportMode::DirectOnly, &vec![0x99; 14 * 1024 * 1024 + 12345], "unevenchunk", 4 * 1024 * 1024).await;
+}
+
+#[tokio::test]
 async fn multi_stream_past_chunk_3593_test() {
     transfer_with_chunk(TransportMode::DirectOnly, &vec![0x77; 240 * 1024 * 1024], "chunk3593", 64 * 1024).await;
 }

@@ -75,6 +75,9 @@ pub enum Commands {
     /// Iniciar la interfaz gráfica interactiva (por defecto si no se pasa comando)
     Gui,
 
+    /// Medir la velocidad y latencia de la conexión a Internet (Cloudflare Anycast)
+    Speedtest,
+
     /// Ejecutar el servidor ligero de señalización y relay (rendezvous)
     Server {
         /// Puerto TCP para escuchar conexiones de señalización y relay (por defecto: 7880)

@@ -13,6 +13,7 @@ pub mod server;
 pub mod session;
 pub mod signaling;
 pub mod speed_limiter;
+pub mod speedtest;
 pub mod transfer_state;
 mod task_guard;
 

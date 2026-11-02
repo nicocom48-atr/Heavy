@@ -175,6 +175,89 @@ async fn run_cli(command: cli::Commands, verbose: bool) -> ExitCode {
             }
         }
         cli::Commands::Gui => ExitCode::SUCCESS,
+        cli::Commands::Speedtest => {
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let state = std::sync::Arc::new(parking_lot::Mutex::new(heavydrop::speedtest::SpeedTestPhase::Idle));
+            println!("{}", "⚡ Iniciando prueba de velocidad de Internet (Cloudflare Anycast)...".cyan().bold());
+
+            let pb = indicatif::ProgressBar::new_spinner();
+            pb.set_style(
+                indicatif::ProgressStyle::default_spinner()
+                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                    .template("{spinner:.green} {msg}")
+                    .unwrap(),
+            );
+            pb.enable_steady_tick(std::time::Duration::from_millis(80));
+
+            let state_monitor = state.clone();
+            let pb_clone = pb.clone();
+            let monitor_task = tokio::spawn(async move {
+                let mut last_phase = heavydrop::speedtest::SpeedTestPhase::Idle;
+                loop {
+                    let phase = state_monitor.lock().clone();
+                    if phase != last_phase {
+                        match &phase {
+                            heavydrop::speedtest::SpeedTestPhase::Idle => {
+                                pb_clone.set_message("Preparando prueba...");
+                            }
+                            heavydrop::speedtest::SpeedTestPhase::MeasuringPing => {
+                                pb_clone.set_message("Midiendo latencia (ping)...");
+                            }
+                            heavydrop::speedtest::SpeedTestPhase::MeasuringDownload { progress, current_mbps } => {
+                                pb_clone.set_message(format!("Midiendo bajada ({:.0}%)... {:.1} Mbps", progress * 100.0, current_mbps));
+                            }
+                            heavydrop::speedtest::SpeedTestPhase::MeasuringUpload { progress, current_mbps } => {
+                                pb_clone.set_message(format!("Midiendo subida ({:.0}%)... {:.1} Mbps", progress * 100.0, current_mbps));
+                            }
+                            heavydrop::speedtest::SpeedTestPhase::Completed(_) => {
+                                pb_clone.finish_and_clear();
+                                break;
+                            }
+                            heavydrop::speedtest::SpeedTestPhase::Failed(err) => {
+                                pb_clone.finish_with_message(format!("Fallo: {}", err));
+                                break;
+                            }
+                        }
+                        last_phase = phase;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+
+            heavydrop::speedtest::run_speed_test(state.clone(), cancel).await;
+            let _ = monitor_task.await;
+
+            let final_phase = state.lock().clone();
+            match final_phase {
+                heavydrop::speedtest::SpeedTestPhase::Completed(res) => {
+                    println!("\n{}", "================ [ RESULTADOS DE VELOCIDAD ] ================".bold().cyan());
+                    println!("  Latencia (Ping) : {}", format!("{:.1} ms", res.ping_ms).green().bold());
+                    println!(
+                        "  Bajada (Download): {} ({:.2} MB/s)",
+                        format!("{:.1} Mbps", res.download_mbps).green().bold(),
+                        res.download_mbs
+                    );
+                    println!(
+                        "  Subida (Upload)  : {} ({:.2} MB/s)",
+                        format!("{:.1} Mbps", res.upload_mbps).green().bold(),
+                        res.upload_mbs
+                    );
+                    println!("{}", "------------------------------------------------------------".cyan());
+                    println!(
+                        "  💡 Límite recomendado al 85%: Subida: {} MB/s | Bajada: {} MB/s",
+                        res.recommended_upload_limit_mb(),
+                        res.recommended_download_limit_mb()
+                    );
+                    println!("{}\n", "============================================================".bold().cyan());
+                    ExitCode::SUCCESS
+                }
+                heavydrop::speedtest::SpeedTestPhase::Failed(err) => {
+                    eprintln!("\n{} Error en la prueba de velocidad: {}", "ERROR:".red().bold(), err);
+                    ExitCode::FAILURE
+                }
+                _ => ExitCode::FAILURE,
+            }
+        }
         cli::Commands::Server { port } => {
             let server = SignalingServer::new(port);
             match server.run().await {
