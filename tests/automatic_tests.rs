@@ -38,11 +38,19 @@ async fn port_is_released(code: &PairingCode) {
 }
 
 fn sender_config(file_path: PathBuf, session: Session, transport_mode: TransportMode) -> SenderConfig {
-    SenderConfig { transport_mode, file_path, session, preferred_port: 0, chunk_size: 64 * 1024,
+    sender_config_with_chunk(file_path, session, transport_mode, 64 * 1024)
+}
+
+fn sender_config_with_chunk(file_path: PathBuf, session: Session, transport_mode: TransportMode, chunk_size: u32) -> SenderConfig {
+    SenderConfig { transport_mode, file_path, session, preferred_port: 0, chunk_size,
         skip_prehash: false, signaling_server: None, shared_progress: None, cancel_signal: None, speed_limiter: None }
 }
 
 async fn transfer(mode: TransportMode, bytes: &[u8], name: &str) {
+    transfer_with_chunk(mode, bytes, name, 64 * 1024).await;
+}
+
+async fn transfer_with_chunk(mode: TransportMode, bytes: &[u8], name: &str, chunk_size: u32) {
     let source = directory(name);
     let output = directory("download");
     let path = source.join("payload.bin");
@@ -51,7 +59,7 @@ async fn transfer(mode: TransportMode, bytes: &[u8], name: &str) {
     let receiver = TransferManager::new();
     let expected_route = if matches!(mode, TransportMode::RelayOnly(_)) { ConnectionType::Relay } else { ConnectionType::DirectLocal };
     let direct_only = mode == TransportMode::DirectOnly;
-    let config = sender_config(path, Session::new().unwrap(), mode);
+    let config = sender_config_with_chunk(path, Session::new().unwrap(), mode, chunk_size);
     let mut used_code = None;
     let (sent, received) = tokio::time::timeout(Duration::from_secs(45), async {
         tokio::join!(sender.run_send(config), async {
@@ -66,8 +74,74 @@ async fn transfer(mode: TransportMode, bytes: &[u8], name: &str) {
     assert_eq!(tokio::fs::read(output.join("payload.bin")).await.unwrap(), bytes);
     assert_eq!(sender.progress().lock().status, TransferStatus::Completed);
     assert_eq!(receiver.progress().lock().status, TransferStatus::Completed);
-    assert_eq!(sender.progress().lock().connection_type, expected_route);
+    if direct_only {
+        assert!(matches!(
+            sender.progress().lock().connection_type,
+            ConnectionType::DirectLocal | ConnectionType::DirectInternet
+        ));
+    } else {
+        assert_eq!(sender.progress().lock().connection_type, expected_route);
+    }
     assert!(!sender.is_busy());
+    port_is_released(&used_code.unwrap()).await;
+    std::fs::remove_dir_all(source).unwrap();
+    std::fs::remove_dir_all(output).unwrap();
+}
+
+#[tokio::test]
+async fn multi_stream_4mb_chunks_transfer_test() {
+    transfer_with_chunk(TransportMode::DirectOnly, &vec![0x42; 24 * 1024 * 1024], "multichunk4m", 4 * 1024 * 1024).await;
+}
+
+#[tokio::test]
+async fn upload_and_download_speed_limiter_transfer_test() {
+    let source = directory("speed_test_src");
+    let output = directory("speed_test_dst");
+    let path = source.join("payload.bin");
+    let bytes = vec![0x55u8; 4 * 1024 * 1024]; // 4 MB
+    tokio::fs::write(&path, &bytes).await.unwrap();
+
+    let upload_limiter = heavydrop::speed_limiter::SpeedLimiter::new(2 * 1024 * 1024); // 2 MB/s
+    let download_limiter = heavydrop::speed_limiter::SpeedLimiter::default(); // unlimited
+
+    let sender = TransferManager::new();
+    let receiver = TransferManager::new();
+
+    let mut config = sender_config_with_chunk(path, Session::new().unwrap(), TransportMode::DirectOnly, 512 * 1024);
+    config.speed_limiter = Some(upload_limiter.clone());
+
+    let start_time = std::time::Instant::now();
+    let mut used_code = None;
+
+    let (sent, received) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(sender.run_send(config), async {
+            let code = invitation(&sender).await;
+            used_code = Some(code.clone());
+
+            // Test dynamic update "en caliente": change upload limit on the fly
+            upload_limiter.set_limit_mbps(5);
+            assert_eq!(upload_limiter.get_limit_mbps(), 5);
+
+            receiver.run_recv(ReceiverConfig {
+                allow_legacy_tcp: false,
+                direct_only: true,
+                code,
+                output_dir: output.clone(),
+                force: false,
+                signaling_server: None,
+                shared_progress: None,
+                cancel_signal: None,
+                discovery: None,
+                speed_limiter: Some(download_limiter.clone()),
+            }).await
+        })
+    }).await.unwrap();
+
+    sent.unwrap();
+    received.unwrap();
+    assert_eq!(tokio::fs::read(output.join("payload.bin")).await.unwrap(), bytes);
+    assert!(start_time.elapsed() >= Duration::from_millis(600));
+
     port_is_released(&used_code.unwrap()).await;
     std::fs::remove_dir_all(source).unwrap();
     std::fs::remove_dir_all(output).unwrap();

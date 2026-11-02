@@ -843,34 +843,39 @@ fn parse_friendly_error(text: &str) -> (String, Option<String>) {
     let lower = text.to_lowercase();
     if lower.contains("too many gaps in stream buffer") {
         (
-            "Fallo de transporte QUIC: saturaciÃ³n de fragmentos de red. HeavyDrop optimizÃ³ los bÃºferes y reintentarÃ¡ automÃ¡ticamente.".to_string(),
+            "Fallo de transporte QUIC: saturación de fragmentos de red. HeavyDrop optimizó los búferes y reintentará automáticamente.".to_string(),
+            Some(text.to_string()),
+        )
+    } else if lower.contains("aead decryption failed") || lower.contains("integridad de bloque fallida") {
+        (
+            "Fallo temporal de bloque en tránsito. HeavyDrop reanudará automáticamente el bloque...".to_string(),
             Some(text.to_string()),
         )
     } else if lower.contains("connection lost") || lower.contains("aborted by peer") {
         (
-            "ConexiÃ³n perdida con el interlocutor. Reanudando desde el Ãºltimo bloque verificado...".to_string(),
+            "Conexión perdida con el interlocutor. Reanudando desde el último bloque verificado...".to_string(),
             Some(text.to_string()),
         )
-    } else if lower.contains("autenticaciÃ³n") || lower.contains("cÃ³digo incorrecto") {
+    } else if lower.contains("autenticación") || lower.contains("código incorrecto") || lower.contains("autenticacion") || lower.contains("codigo incorrecto") {
         (
-            "Error de autenticaciÃ³n: la clave de sesiÃ³n o invitaciÃ³n no coincide.".to_string(),
+            "Error de autenticación: la clave de sesión o invitación no coincide.".to_string(),
             Some(text.to_string()),
         )
     } else if lower.contains("cancelada por el usuario") {
         ("Transferencia cancelada.".to_string(), None)
     } else if lower.contains("ya existe") {
         (
-            "El archivo ya existe en destino. ActivÃ¡ 'Sobrescribir' o seleccionÃ¡ otra carpeta.".to_string(),
+            "El archivo ya existe en destino. Activá 'Sobrescribir' o seleccioná otra carpeta.".to_string(),
             None,
         )
     } else if lower.contains("integridad") {
         (
-            "Fallo en la verificaciÃ³n de integridad criptogrÃ¡fica de los datos recibidos.".to_string(),
+            "Fallo en la verificación de integridad criptográfica de los datos recibidos.".to_string(),
             Some(text.to_string()),
         )
     } else if text.len() > 80 || lower.contains("error:") || lower.contains("failed") {
         (
-            "OcurriÃ³ un error en la transferencia.".to_string(),
+            "Ocurrió un error en la transferencia.".to_string(),
             Some(text.to_string()),
         )
     } else {
@@ -882,7 +887,7 @@ fn error_message(ui: &mut egui::Ui, text: &str) {
     let (friendly, technical) = parse_friendly_error(text);
     ui.add(egui::Label::new(egui::RichText::new(&friendly).color(RED).strong()).wrap());
     if let Some(tech) = technical {
-        ui.collapsing("Detalles tÃ©cnicos", |ui| {
+        ui.collapsing("Detalles técnicos", |ui| {
             ui.add(egui::Label::new(egui::RichText::new(tech).monospace().size(11.0).color(MUTED)).wrap());
         });
     }

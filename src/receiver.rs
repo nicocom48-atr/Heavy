@@ -58,11 +58,11 @@ pub fn is_recoverable_network_error(err: &anyhow::Error) -> bool {
         || err_str.contains("cancelado")
         || err_str.contains("autenticación")
         || err_str.contains("código incorrecto")
+        || err_str.contains("la invitación expiró")
         || err_str.contains("el archivo de destino ya existe")
         || err_str.contains("enlace simbólico")
         || err_str.contains("componentes de ruta")
         || err_str.contains("integridad global fallida")
-        || err_str.contains("verificación de integridad de bloque fallida")
     {
         return false;
     }
@@ -80,7 +80,7 @@ pub fn is_recoverable_network_error(err: &anyhow::Error) -> bool {
         }
     }
 
-    // Recoverable QUIC and network keywords
+    // Recoverable QUIC, chunk and network keywords
     err_str.contains("connection lost")
         || err_str.contains("too many gaps in stream buffer")
         || err_str.contains("aborted by peer")
@@ -95,6 +95,12 @@ pub fn is_recoverable_network_error(err: &anyhow::Error) -> bool {
         || err_str.contains("no respondió")
         || err_str.contains("el servidor temporal se cerró")
         || err_str.contains("internal error")
+        || err_str.contains("aead decryption failed")
+        || err_str.contains("verificación de integridad de bloque fallida")
+        || err_str.contains("descifrado y verificación")
+        || err_str.contains("error de sincronización en stream")
+        || err_str.contains("tamaño de bloque cifrado inválido")
+        || err_str.contains("terminó prematuramente")
 }
 
 pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
@@ -589,6 +595,7 @@ async fn run_receiver_session(
 
             let (mut send_stream, recv_stream) = quic_conn.open_bi().await?;
             send_stream_range_request(&mut send_stream, &req).await?;
+            let _ = send_stream.finish();
             reader_join_set.spawn(async move {
                 run_stream_reader(
                     recv_stream,

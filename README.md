@@ -35,8 +35,9 @@ Para transferencias masivas de 10 GB a 1 TB+ a través de Internet con fluctuaci
    - Ventana de conexión acumulada: **32 MiB** (`DEFAULT_CONN_RECEIVE_WINDOW`).
    - Ventana de envío: **32 MiB** (`DEFAULT_SEND_WINDOW`).
 3. **Multi-Stream Paralelo (4 Streams QUIC):** En conexiones QUIC con archivos de tamaño suficiente, la transferencia se particiona automáticamente en **4 streams bidireccionales paralelos**. Cada stream transfiere su rango asignado de bloques con encabezados independientes, distribuyendo los paquetes en la red y eliminando el bloqueo de cabeza de línea (*Head-of-Line blocking*).
-4. **Reconexión y Reanudación Automática (10 Intentos con Backoff Exponencial):** Ante cortes transitorios de red, saturación o microdesconexiones, el receptor reintenta conectarse automáticamente hasta 10 veces con backoff exponencial. El emisor mantiene su servidor temporal activo y la transferencia se reanuda inmediatamente desde el último bloque verificado sin perder los datos ya descargados.
-5. **Diagnóstico y Trazabilidad:** Soporte nativo de `tracing` compatible con `RUST_LOG` y la bandera global `--verbose` (`-v`) en la CLI. En la GUI, los errores muestran mensajes claros en español con un desplegable de **Detalles técnicos**.
+4. **Control de Velocidad Dinámico en Caliente:** Regulación de ancho de banda en tiempo real mediante *token-bucket* compartido cooperativamente entre todos los streams de subida y bajada. Los límites pueden modificarse en tiempo real durante una transferencia activa desde los controles de la GUI o CLI sin interrumpir la sesión.
+5. **Reconexión y Reanudación Automática (10 Intentos con Backoff Exponencial):** Ante cortes transitorios de red, saturación, microdesconexiones o fallos en bloques individuales en tránsito, el receptor reintenta conectarse automáticamente hasta 10 veces con backoff exponencial. El emisor mantiene su servidor temporal activo y la transferencia se reanuda inmediatamente desde el último bloque verificado sin perder los datos ya descargados.
+6. **Diagnóstico y Trazabilidad:** Soporte nativo de `tracing` compatible con `RUST_LOG` y la bandera global `--verbose` (`-v`) en la CLI. En la GUI, los errores muestran mensajes claros en español con un desplegable de **Detalles técnicos**.
 
 ## Integridad, reanudación y archivos existentes
 

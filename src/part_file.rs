@@ -54,6 +54,7 @@ pub struct PartFileManager {
     pub file: File,
     pub metadata: PartMetadata,
     overwrite: bool,
+    recent_chunk_hashes: std::collections::HashMap<u64, [u8; 32]>,
 }
 
 impl PartFileManager {
@@ -184,6 +185,11 @@ impl PartFileManager {
             verified_ranges: existing_ranges,
         };
 
+        let mut recent_chunk_hashes = std::collections::HashMap::new();
+        if resume_offset > 0 {
+            recent_chunk_hashes.insert(resume_offset, last_chunk_hash);
+        }
+
         let part_manager = PartFileManager {
             final_path,
             part_path,
@@ -191,6 +197,7 @@ impl PartFileManager {
             file,
             metadata,
             overwrite: force,
+            recent_chunk_hashes,
         };
 
         Ok(PrepareResult::Ready {
@@ -220,9 +227,26 @@ impl PartFileManager {
             .await
             .context("Failed to write chunk to disk")?;
 
+        self.recent_chunk_hashes.insert(offset + len, chunk_hash);
         add_verified_range(&mut self.metadata.verified_ranges, offset, offset + len);
         self.metadata.verified_bytes = self.metadata.verified_ranges.iter().map(|(s, e)| e - s).sum();
-        self.metadata.last_chunk_hash = chunk_hash;
+
+        let contiguous_end = self
+            .metadata
+            .verified_ranges
+            .first()
+            .map(|(s, e)| if *s == 0 { *e } else { 0 })
+            .unwrap_or(0);
+
+        if let Some(h) = self.recent_chunk_hashes.get(&contiguous_end) {
+            self.metadata.last_chunk_hash = *h;
+        } else if offset + len == contiguous_end {
+            self.metadata.last_chunk_hash = chunk_hash;
+        }
+
+        if self.recent_chunk_hashes.len() > 128 {
+            self.recent_chunk_hashes.retain(|&end, _| end >= contiguous_end);
+        }
 
         let json = serde_json::to_vec(&self.metadata)?;
         tokio::fs::write(&self.meta_path, json)

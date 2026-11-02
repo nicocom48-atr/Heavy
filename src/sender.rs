@@ -269,9 +269,12 @@ async fn run_stream_sender<W: AsyncWriteExt + Unpin>(
     end_offset: u64,
     total_transferred: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
+    speed_limiter: Option<crate::speed_limiter::SpeedLimiter>,
 ) -> Result<()> {
     if start_offset >= end_offset {
         send_end_of_stream(&mut writer).await?;
+        let _ = writer.flush().await;
+        let _ = writer.shutdown().await;
         return Ok(());
     }
 
@@ -300,6 +303,10 @@ async fn run_stream_sender<W: AsyncWriteExt + Unpin>(
         let ciphertext = encrypt_chunk(&cipher, &salt, chunk_index, &buf[..actual_to_read])?;
         let checksum = *blake3::hash(&buf[..actual_to_read]).as_bytes();
 
+        if let Some(ref limiter) = speed_limiter {
+            limiter.consume(actual_to_read).await;
+        }
+
         send_prepared_chunk(&mut writer, current_offset, &checksum, &ciphertext).await?;
 
         total_transferred.fetch_add(actual_to_read as u64, Ordering::Relaxed);
@@ -307,6 +314,8 @@ async fn run_stream_sender<W: AsyncWriteExt + Unpin>(
     }
 
     send_end_of_stream(&mut writer).await?;
+    let _ = writer.flush().await;
+    let _ = writer.shutdown().await;
     Ok(())
 }
 
@@ -511,6 +520,7 @@ async fn run_sender_session(
             let chunk_size = config.chunk_size as u64;
             let trans_worker = total_transferred.clone();
             let cancel_worker = cancel.clone();
+            let limiter_worker = config.speed_limiter.clone();
 
             join_set.spawn(async move {
                 run_stream_sender(
@@ -525,6 +535,7 @@ async fn run_sender_session(
                     req.end_offset,
                     trans_worker,
                     cancel_worker,
+                    limiter_worker,
                 )
                 .await
             });
@@ -542,6 +553,7 @@ async fn run_sender_session(
             req_0.end_offset,
             total_transferred.clone(),
             cancel.clone(),
+            config.speed_limiter.clone(),
         );
 
         let workers_fut = async {
