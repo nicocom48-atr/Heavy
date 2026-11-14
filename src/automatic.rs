@@ -105,7 +105,7 @@ impl SenderServer {
             tokio::time::timeout(Duration::from_secs(25), owner.endpoint().online()).await
                 .context("No se pudo acceder al relay configurado")?;
         } else if mode == TransportMode::Automatic {
-            let _ = tokio::time::timeout(Duration::from_secs(2), owner.endpoint().online()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(8), owner.endpoint().online()).await;
         }
         tokio::time::timeout(Duration::from_secs(5), async {
             while owner.endpoint().addr().is_empty() {
