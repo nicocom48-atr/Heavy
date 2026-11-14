@@ -8,12 +8,17 @@ trap {
 }
 Push-Location -LiteralPath $RepositoryRoot
 try {
-    $gitCmd = (@(Get-Command -CommandType Application git)[0]).Source
+    $gitCmd = (@(Get-Command -CommandType Application git -ErrorAction SilentlyContinue)[0]).Source
     if (-not $gitCmd) { $gitCmd = 'git.exe' }
     function Invoke-Git([string[]]$Arguments) {
         $result = & $gitCmd @Arguments
         if ($LASTEXITCODE -ne 0) { throw "Git failed: $($Arguments -join ' ')" }
         return $result
+    }
+    # Ensure remote tags are synchronized when running in a repository with origin
+    $remotes = @(Invoke-Git @('remote'))
+    if ($remotes -contains 'origin') {
+        try { Invoke-Git @('fetch', '--tags', '--force', 'origin') | Out-Null } catch {}
     }
     $sourceSha = (Invoke-Git @('rev-parse', 'HEAD')).Trim()
     $automatic = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main'
@@ -28,7 +33,10 @@ try {
                 # A previous run may have pushed the tag but failed before uploading assets.
                 # Rebuild the same release commit and retry publishing; never allocate another version.
                 Invoke-Git @('checkout', '--detach', $existing) | Out-Null
-                if ($env:GITHUB_OUTPUT) { "release_exists=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
+                if ($env:GITHUB_OUTPUT) {
+                    "release_exists=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+                    "tag_created=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+                }
                 if ($env:GITHUB_ENV) { "RELEASE_TAG=$existing" | Add-Content -LiteralPath $env:GITHUB_ENV }
                 Write-Output "Retrying prepared release for $sourceSha : $existing"
                 return
@@ -51,10 +59,12 @@ try {
         $tag = $env:INPUT_TAG
     }
     if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Expected a release tag in vMAJOR.MINOR.PATCH format' }
+    $tagCreated = $false
     if ($tags -contains $tag) {
         $tagSha = (Invoke-Git @('rev-parse', "$tag^{commit}")).Trim()
         if ($tagSha -ne $sourceSha) { throw 'Existing tag points to a different commit; refusing to replace it' }
     } else {
+        $tagCreated = $true
         $version = $tag.Substring(1)
         $manifest = [regex]::Replace($manifest, $packagePattern, { param($m) $m.Groups[1].Value + $version + $m.Groups[3].Value })
         $lock = [System.IO.File]::ReadAllText($lockPath)
@@ -73,7 +83,11 @@ try {
         Invoke-Git @('tag', '-a', $tag, '-m', "HeavyDrop $tag") | Out-Null
     }
     # Only the release tag is pushed after tests/build succeed. main is never modified by the bot.
+    $tagCreatedStr = if ($tagCreated) { 'true' } else { 'false' }
     if ($env:GITHUB_ENV) { "RELEASE_TAG=$tag" | Add-Content -LiteralPath $env:GITHUB_ENV }
-    if ($env:GITHUB_OUTPUT) { "release_exists=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
-    Write-Output "Prepared $tag from $sourceSha"
+    if ($env:GITHUB_OUTPUT) {
+        "release_exists=false" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+        "tag_created=$tagCreatedStr" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+    }
+    Write-Output "Prepared $tag from $sourceSha (tag_created=$tagCreatedStr)"
 } finally { Pop-Location }

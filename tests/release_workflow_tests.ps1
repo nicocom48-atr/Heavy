@@ -51,7 +51,7 @@ foreach ($key in @('GITHUB_OUTPUT', 'GITHUB_ENV', 'GITHUB_EVENT_NAME', 'GITHUB_R
 }
 
 try {
-    $gitCmd = (@(Get-Command -CommandType Application git)[0]).Source
+    $gitCmd = (@(Get-Command -CommandType Application git -ErrorAction SilentlyContinue)[0]).Source
     if (-not $gitCmd) { $gitCmd = 'git.exe' }
     function Run-Git([string[]]$Arguments) {
         $res = & $gitCmd @Arguments
@@ -95,6 +95,9 @@ try {
     if ($outContent -notmatch 'release_exists=false') {
         throw "Expected release_exists=false, got: $outContent"
     }
+    if ($outContent -notmatch 'tag_created=true') {
+        throw "Expected tag_created=true, got: $outContent"
+    }
     if ($envContent -notmatch 'RELEASE_TAG=v0\.2\.7') {
         throw "Expected RELEASE_TAG=v0.2.7, got: $envContent"
     }
@@ -122,6 +125,9 @@ try {
     if ($secondOut -notmatch 'release_exists=false') {
         throw "A source-commit retry must rebuild and publish its existing version: $secondOut"
     }
+    if ($secondOut -notmatch 'tag_created=false') {
+        throw "A source-commit retry must not mark tag as newly created: $secondOut"
+    }
     if ((Run-Git @('tag', '--list', 'v*')).Count -ne 2) { throw 'Retry created an extra release tag' }
     if ((Run-Git @('rev-parse', 'HEAD')).Trim() -ne (Run-Git @('rev-parse', 'v0.2.7^{commit}')).Trim()) {
         throw 'Retry did not check out the prepared release commit'
@@ -137,6 +143,9 @@ try {
     if ($thirdOut -notmatch 'release_exists=false') {
         throw "A tagged-commit retry must rebuild and publish its existing version: $thirdOut"
     }
+    if ($thirdOut -notmatch 'tag_created=false') {
+        throw "A tagged-commit retry must not mark tag as newly created: $thirdOut"
+    }
     # A different merge must receive the next version rather than reusing the previous one.
     Run-Git @('commit', '--allow-empty', '-m', 'Next feature') | Out-Null
     Clear-Content -LiteralPath $outputFile
@@ -144,6 +153,9 @@ try {
     & $PrepareScript -RepositoryRoot $tempDir
     if ((Get-Content -Raw -LiteralPath $envFile) -notmatch 'RELEASE_TAG=v0\.2\.8') {
         throw 'A new source commit did not receive the next version'
+    }
+    if ((Get-Content -Raw -LiteralPath $outputFile) -notmatch 'tag_created=true') {
+        throw 'A new version allocation must mark tag as newly created'
     }
 
     # Manual releases can use an already-updated manifest without a staged version diff.
@@ -160,6 +172,9 @@ try {
     & $PrepareScript -RepositoryRoot $tempDir
     if ((Run-Git @('rev-parse', 'v0.2.9^{commit}')).Trim() -ne $manualSha) {
         throw 'Manual release unexpectedly changed a matching manifest'
+    }
+    if ((Get-Content -Raw -LiteralPath $outputFile) -notmatch 'tag_created=true') {
+        throw 'Manual release with new tag must mark tag as newly created'
     }
     Write-Host "    Automatic increments, same-version retries and manual releases passed!"
 } finally {
