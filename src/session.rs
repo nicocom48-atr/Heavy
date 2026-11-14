@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::pairing::PairingCode;
 
-pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(5 * 60); // 5 minutes
+pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(24 * 3600); // 24 hours for massive transfers
 
 #[derive(Clone)]
 pub struct Session {
@@ -86,12 +86,22 @@ impl Session {
         }
     }
 
-    /// Format remaining time as MM:SS (e.g. "04:59")
+    /// Format remaining time as HH:MM:SS or MM:SS (e.g. "23:59:59" or "04:59")
     pub fn format_remaining(&self) -> String {
         let secs = self.remaining_time().as_secs();
-        let mins = secs / 60;
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
         let rem = secs % 60;
-        format!("{:02}:{:02}", mins, rem)
+        if hours > 0 {
+            format!("{:02}:{:02}:{:02}", hours, mins, rem)
+        } else {
+            format!("{:02}:{:02}", mins, rem)
+        }
+    }
+
+    /// Refresh the session start time to prevent expiration during active transfers and reconnections.
+    pub fn touch(&self) {
+        *self.created_at.lock() = Instant::now();
     }
 
     /// Mark session code as consumed (one-time use)

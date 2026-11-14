@@ -115,15 +115,25 @@ impl SenderServer {
         .await
         .context("No se encontraron rutas para el servidor temporal")?;
         session.start_waiting();
+        let addr = owner.endpoint().addr();
+        let has_relay = addr.relay_urls().next().is_some();
         let invitation = session
             .code()
-            .with_invitation(owner.endpoint().addr(), session.remaining_time())?
+            .with_invitation(addr, session.remaining_time())?
             .formatted();
         if let Some(ref shared) = progress {
             let mut p = shared.lock();
             p.status = TransferStatus::WaitingForPeer;
             p.pairing_code = Some(invitation.clone());
-            p.status_text = "Servidor temporal listo. Comparte la invitación con el receptor.".into();
+            if mode == TransportMode::Automatic && !has_relay {
+                p.status_text = "Listo (Sin relay público: solo conexiones en la misma red local). Comparte la invitación.".into();
+            } else {
+                p.status_text = "Servidor temporal listo. Comparte la invitación con el receptor.".into();
+            }
+        }
+        if mode == TransportMode::Automatic && !has_relay {
+            tracing::warn!("No se pudo contactar el relay público. La invitación solo funcionará en red local (LAN).");
+            println!("  ⚠️ Advertencia: No se pudo contactar el relay público. La invitación solo funcionará en red local (LAN).");
         }
         println!(
             "  Invitación: {invitation}\n  Servidor temporal listo. Expira en {}",
@@ -148,7 +158,7 @@ impl SenderServer {
                     .accept()
                     .await
                     .context("El servidor temporal se cerró")?;
-                let attempt = tokio::time::timeout(Duration::from_secs(10), async {
+                let attempt = tokio::time::timeout(Duration::from_secs(30), async {
                     let connection = incoming.await?;
                     let (send, mut recv) = connection.accept_bi().await?;
                     if recv.read_u8().await? != 6 {
@@ -158,6 +168,7 @@ impl SenderServer {
                 })
                 .await;
                 if let Ok(Ok(parts)) = attempt {
+                    session.touch();
                     return Ok::<_, anyhow::Error>(parts);
                 }
             }
@@ -220,7 +231,7 @@ pub async fn connect_receiver_with_policy(
             .await?,
     ));
     tracing::info!("Conectando al endpoint del emisor...");
-    let connection = tokio::time::timeout(Duration::from_secs(30),
+    let connection = tokio::time::timeout(Duration::from_secs(50),
         owner.endpoint().connect(address, ALPN)).await
         .context("No se pudo conectar a tiempo. Comprueba que el emisor siga abierto y la invitación no haya expirado")??;
     let (mut send, recv) = connection.open_bi().await?;

@@ -19,7 +19,7 @@ use crate::protocol::{
     CHUNK_TIMEOUT, DEFAULT_PARALLEL_STREAMS, PROTOCOL_VERSION,
 };
 use crate::signaling::SignalingClient;
-use crate::transfer_state::{SharedProgress, TransferRole, TransferStatus};
+use crate::transfer_state::{ConnectionType, SharedProgress, TransferRole, TransferStatus};
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 const CHANNEL_BUFFER_CHUNKS: usize = 64; // Max 4-8 MiB pipeline buffer
@@ -232,6 +232,43 @@ pub async fn run_receiver(config: ReceiverConfig) -> Result<()> {
     }
 }
 
+/// Read an exact buffer with an inactivity timeout.
+/// The timeout resets whenever bytes arrive, ensuring active but slow or congested transfers
+/// do not fail as long as data keeps flowing.
+async fn read_exact_with_inactivity_timeout<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut [u8],
+    inactivity_timeout: Duration,
+) -> std::io::Result<()> {
+    let mut total_read = 0;
+    while total_read < buf.len() {
+        match tokio::time::timeout(inactivity_timeout, reader.read(&mut buf[total_read..])).await {
+            Ok(Ok(0)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Flujo cerrado prematuramente por el emisor",
+                ));
+            }
+            Ok(Ok(n)) => {
+                total_read += n;
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "Inactividad de red: no se recibieron datos en {}s (leídos {}/{} bytes)",
+                        inactivity_timeout.as_secs(),
+                        total_read,
+                        buf.len()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 struct IncomingChunk {
     offset: u64,
     chunk_index: u64,
@@ -294,16 +331,9 @@ async fn run_stream_reader<R: AsyncReadExt + Unpin>(
             }
 
             let mut ciphertext = vec![0u8; header.ciphertext_length as usize];
-            match tokio::time::timeout(CHUNK_TIMEOUT, reader.read_exact(&mut ciphertext)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("Fallo de red al leer bloque cifrado en stream {}: {:#}", stream_id, e))).await;
-                    return;
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("Timeout de red leyendo bloque en stream {}: {}", stream_id, e))).await;
-                    return;
-                }
+            if let Err(e) = read_exact_with_inactivity_timeout(&mut reader, &mut ciphertext, CHUNK_TIMEOUT).await {
+                let _ = tx.send(Err(anyhow::anyhow!("Fallo de red al leer bloque cifrado en stream {}: {:#}", stream_id, e))).await;
+                return;
             }
 
             let chunk_index = current_offset / chunk_size;
@@ -483,8 +513,13 @@ async fn run_receiver_session(
     let remaining_chunks = total_chunks.saturating_sub(start_chunk);
 
     let is_quic = established.quic_connection.is_some();
-    let num_streams = if is_quic && remaining_chunks >= DEFAULT_PARALLEL_STREAMS as u64 {
-        offer.parallel_streams.clamp(1, DEFAULT_PARALLEL_STREAMS)
+    let max_allowed_streams = if established.conn_type == ConnectionType::Relay {
+        2 // Max 2 streams over relay to prevent packet out-of-order accumulation and relay buffer contention
+    } else {
+        DEFAULT_PARALLEL_STREAMS
+    };
+    let num_streams = if is_quic && remaining_chunks >= max_allowed_streams as u64 {
+        offer.parallel_streams.clamp(1, max_allowed_streams)
     } else {
         1
     };

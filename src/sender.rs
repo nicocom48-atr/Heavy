@@ -199,7 +199,10 @@ pub async fn run_sender(config: SenderConfig) -> Result<()> {
             }
 
             let mut established = match server.accept_connection(&config.session).await {
-                Ok(conn) => conn,
+                Ok(conn) => {
+                    config.session.touch();
+                    conn
+                }
                 Err(e) => {
                     if cancel.load(Ordering::Relaxed) {
                         bail!("Transferencia cancelada por el usuario");
@@ -349,7 +352,11 @@ async fn run_sender_session(
 
     let can_multi_stream = established.quic_connection.is_some();
     let offer_parallel_streams = if can_multi_stream {
-        DEFAULT_PARALLEL_STREAMS
+        if established.conn_type == crate::transfer_state::ConnectionType::Relay {
+            2
+        } else {
+            DEFAULT_PARALLEL_STREAMS
+        }
     } else {
         1
     };
@@ -414,7 +421,7 @@ async fn run_sender_session(
     let remaining_chunks = total_chunks.saturating_sub(start_chunk);
 
     let is_quic = established.quic_connection.is_some();
-    let num_streams = if is_quic && remaining_chunks >= DEFAULT_PARALLEL_STREAMS as u64 {
+    let num_streams = if is_quic && remaining_chunks >= offer_parallel_streams as u64 {
         response.parallel_streams.min(offer_parallel_streams).max(1)
     } else {
         1
