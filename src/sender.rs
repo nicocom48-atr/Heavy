@@ -470,21 +470,19 @@ async fn run_sender_session(
     let shared_progress_clone = config.shared_progress.clone();
     let pb_clone = pb.clone();
 
+    // Dedicated progress monitoring task using 1.5s sliding window
     let progress_task = tokio::spawn(async move {
-        let mut last_instant = Instant::now();
-        let mut last_bytes = progress_total.load(Ordering::Relaxed);
+        let mut speed_window = crate::transfer_state::SpeedWindow::new(Duration::from_millis(1500));
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         while !progress_cancel.load(Ordering::Relaxed) {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            ticker.tick().await;
             let current = progress_total.load(Ordering::Relaxed);
-            let delta = current.saturating_sub(last_bytes);
             let now = Instant::now();
-            let elapsed_sec = now.duration_since(last_instant).as_secs_f64();
-            let bps = if elapsed_sec > 0.0 {
-                delta as f64 / elapsed_sec
-            } else {
-                0.0
-            };
+
+            speed_window.record(now, current);
+            let bps = speed_window.current_speed(now);
 
             if let Some(ref bar) = pb_clone {
                 bar.set_position(current);
@@ -495,9 +493,6 @@ async fn run_sender_session(
                 p.transferred_bytes = current;
                 p.bytes_per_sec = bps;
             }
-
-            last_instant = now;
-            last_bytes = current;
         }
     });
 
@@ -584,10 +579,18 @@ async fn run_sender_session(
         if let Err(e) = res_0 {
             join_set.shutdown().await;
             progress_task.abort();
+    if let Some(ref sp) = config.shared_progress {
+        let mut p = sp.lock();
+        p.bytes_per_sec = 0.0;
+    }
             return Err(e);
         }
         if let Err(e) = res_workers {
             progress_task.abort();
+    if let Some(ref sp) = config.shared_progress {
+        let mut p = sp.lock();
+        p.bytes_per_sec = 0.0;
+    }
             return Err(e);
         }
     } else {
@@ -604,6 +607,10 @@ async fn run_sender_session(
         while current_offset < file_size {
             if cancel.load(Ordering::Relaxed) {
                 progress_task.abort();
+    if let Some(ref sp) = config.shared_progress {
+        let mut p = sp.lock();
+        p.bytes_per_sec = 0.0;
+    }
                 bail!("Transferencia cancelada por el usuario");
             }
 
@@ -635,6 +642,10 @@ async fn run_sender_session(
     }
 
     progress_task.abort();
+    if let Some(ref sp) = config.shared_progress {
+        let mut p = sp.lock();
+        p.bytes_per_sec = 0.0;
+    }
 
     // Await completion acknowledgment and integrity proof on stream 0
     let mut ack = [0; 8];

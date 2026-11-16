@@ -239,6 +239,7 @@ async fn read_exact_with_inactivity_timeout<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     buf: &mut [u8],
     inactivity_timeout: Duration,
+    network_bytes: &std::sync::atomic::AtomicU64,
 ) -> std::io::Result<()> {
     let mut total_read = 0;
     while total_read < buf.len() {
@@ -251,6 +252,7 @@ async fn read_exact_with_inactivity_timeout<R: AsyncReadExt + Unpin>(
             }
             Ok(Ok(n)) => {
                 total_read += n;
+                network_bytes.fetch_add(n as u64, Ordering::Relaxed);
             }
             Ok(Err(e)) => return Err(e),
             Err(_) => {
@@ -286,6 +288,7 @@ async fn run_stream_reader<R: AsyncReadExt + Unpin>(
     expected_end: u64,
     tx: tokio::sync::mpsc::Sender<Result<IncomingChunk>>,
     cancel: Arc<AtomicBool>,
+    network_bytes: Arc<std::sync::atomic::AtomicU64>,
 ) {
     if expected_start < expected_end {
         let mut current_offset = expected_start;
@@ -296,7 +299,10 @@ async fn run_stream_reader<R: AsyncReadExt + Unpin>(
             }
 
             let header = match receive_chunk_header(&mut reader).await {
-                Ok(h) => h,
+                Ok(h) => {
+                    network_bytes.fetch_add(44, Ordering::Relaxed);
+                    h
+                }
                 Err(e) => {
                     let _ = tx.send(Err(e.context(format!("Fallo al leer cabecera en stream {}", stream_id)))).await;
                     return;
@@ -331,7 +337,7 @@ async fn run_stream_reader<R: AsyncReadExt + Unpin>(
             }
 
             let mut ciphertext = vec![0u8; header.ciphertext_length as usize];
-            if let Err(e) = read_exact_with_inactivity_timeout(&mut reader, &mut ciphertext, CHUNK_TIMEOUT).await {
+            if let Err(e) = read_exact_with_inactivity_timeout(&mut reader, &mut ciphertext, CHUNK_TIMEOUT, &network_bytes).await {
                 let _ = tx.send(Err(anyhow::anyhow!("Fallo de red al leer bloque cifrado en stream {}: {:#}", stream_id, e))).await;
                 return;
             }
@@ -573,6 +579,9 @@ async fn run_receiver_session(
         "Iniciando pipeline desacoplado de lectura y escritura"
     );
 
+    let network_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let verified_bytes = Arc::new(std::sync::atomic::AtomicU64::new(part_manager.metadata.verified_bytes));
+
     // Decoupled reading channel: bounded mpsc (8 items max in transit)
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<IncomingChunk>>(CHANNEL_BUFFER_CHUNKS);
 
@@ -604,6 +613,7 @@ async fn run_receiver_session(
 
         let tx_0 = tx.clone();
         let cancel_0 = cancel.clone();
+        let net_0 = network_bytes.clone();
         reader_join_set.spawn(async move {
             run_stream_reader(
                 reader_0,
@@ -614,6 +624,7 @@ async fn run_receiver_session(
                 s0_end_offset,
                 tx_0,
                 cancel_0,
+                net_0,
             )
             .await;
         });
@@ -634,6 +645,7 @@ async fn run_receiver_session(
 
             let tx_clone = tx.clone();
             let cancel_clone = cancel.clone();
+            let net_clone = network_bytes.clone();
 
             let (mut send_stream, recv_stream) = quic_conn.open_bi().await?;
             send_stream_range_request(&mut send_stream, &req).await?;
@@ -648,6 +660,7 @@ async fn run_receiver_session(
                     s_end_offset,
                     tx_clone,
                     cancel_clone,
+                    net_clone,
                 )
                 .await;
             });
@@ -656,6 +669,7 @@ async fn run_receiver_session(
         // Single stream mode
         let tx_clone = tx.clone();
         let cancel_clone = cancel.clone();
+        let net_clone = network_bytes.clone();
         reader_join_set.spawn(async move {
             run_stream_reader(
                 reader_0,
@@ -666,6 +680,7 @@ async fn run_receiver_session(
                 offer.file_size,
                 tx_clone,
                 cancel_clone,
+                net_clone,
             )
             .await;
         });
@@ -674,16 +689,50 @@ async fn run_receiver_session(
     // Drop original sender so channel closes when all reader tasks finish
     drop(tx);
 
+    let progress_cancel = cancel.clone();
+    let progress_network = network_bytes.clone();
+    let progress_verified = verified_bytes.clone();
+    let shared_progress_clone = config.shared_progress.clone();
+    let pb_clone = pb.clone();
+
+    // Dedicated progress monitoring task using 1.5s sliding window
+    let progress_task = tokio::spawn(async move {
+        let mut speed_window = crate::transfer_state::SpeedWindow::new(Duration::from_millis(1500));
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        while !progress_cancel.load(Ordering::Relaxed) {
+            ticker.tick().await;
+            let now = Instant::now();
+            let net_current = progress_network.load(Ordering::Relaxed);
+            let ver_current = progress_verified.load(Ordering::Relaxed);
+
+            speed_window.record(now, net_current);
+            let bps = speed_window.current_speed(now);
+
+            if let Some(ref bar) = pb_clone {
+                bar.set_position(ver_current);
+            }
+
+            if let Some(ref sp) = shared_progress_clone {
+                let mut p = sp.lock();
+                p.transferred_bytes = ver_current;
+                p.network_received_bytes = net_current;
+                p.bytes_per_sec = bps;
+            }
+        }
+    });
+
     let cipher_arc = Arc::new(cipher);
     let salt = offer.session_salt;
 
     let start_time = Instant::now();
-    let mut last_speed_update = Instant::now();
-    let mut bytes_since_last_update = 0u64;
 
     // Worker loop: reads decrypted chunks, verifies BLAKE3, writes to disk
     while let Some(chunk_res) = rx.recv().await {
         if cancel.load(Ordering::Relaxed) {
+            let _ = part_manager.flush_checkpoint().await;
+            progress_task.abort();
             reader_join_set.shutdown().await;
             bail!("Transferencia cancelada por el usuario");
         }
@@ -691,7 +740,8 @@ async fn run_receiver_session(
         let chunk = match chunk_res {
             Ok(c) => c,
             Err(e) => {
-                let _ = part_manager.persist_metadata().await;
+                let _ = part_manager.flush_checkpoint().await;
+                progress_task.abort();
                 reader_join_set.shutdown().await;
                 return Err(e);
             }
@@ -719,38 +769,21 @@ async fn run_receiver_session(
             .await?;
 
         let bytes_len = plaintext.len() as u64;
+        verified_bytes.store(part_manager.metadata.verified_bytes, Ordering::Relaxed);
 
         if let Some(ref limiter) = config.speed_limiter {
             limiter.consume(bytes_len as usize).await;
         }
-
-        bytes_since_last_update += bytes_len;
-
-        if let Some(ref bar) = pb {
-            bar.inc(bytes_len);
-        }
-
-        let now = Instant::now();
-        if now.duration_since(last_speed_update) >= Duration::from_millis(250) {
-            let elapsed_sec = now.duration_since(last_speed_update).as_secs_f64();
-            let bps = if elapsed_sec > 0.0 {
-                bytes_since_last_update as f64 / elapsed_sec
-            } else {
-                0.0
-            };
-
-            if let Some(ref sp) = config.shared_progress {
-                let mut p = sp.lock();
-                p.transferred_bytes = part_manager.metadata.verified_bytes;
-                p.bytes_per_sec = bps;
-            }
-
-            last_speed_update = now;
-            bytes_since_last_update = 0;
-        }
     }
 
-    part_manager.persist_metadata().await?;
+    progress_task.abort();
+    part_manager.flush_checkpoint().await?;
+
+    if let Some(ref sp) = config.shared_progress {
+        let mut p = sp.lock();
+        p.transferred_bytes = part_manager.metadata.verified_bytes;
+        p.bytes_per_sec = 0.0;
+    }
 
     // Await reader tasks to ensure no errors were missed
     while let Some(res) = reader_join_set.join_next().await {
@@ -771,7 +804,9 @@ async fn run_receiver_session(
         bar.finish_with_message("Descarga finalizada. Verificando integridad global...");
     }
 
-    part_manager.file.flush().await?;
+    if let Some(ref mut f) = part_manager.file {
+        f.flush().await?;
+    }
 
     if offer.file_hash != "UNVERIFIED_PREHASH" {
         if let Some(ref shared) = config.shared_progress {

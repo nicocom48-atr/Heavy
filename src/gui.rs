@@ -754,7 +754,7 @@ impl TransferMetrics {
             return;
         }
         self.started.get_or_insert_with(Instant::now);
-        if self.last_sample.elapsed().as_millis() >= 350 {
+        if self.last_sample.elapsed().as_millis() >= 200 {
             self.last_sample = Instant::now();
             let speed = progress.bytes_per_sec / (1024.0 * 1024.0);
             self.peak = self.peak.max(speed);

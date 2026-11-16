@@ -47,14 +47,20 @@ pub enum PrepareResult {
     },
 }
 
+pub const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+pub const CHECKPOINT_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024; // 16 MiB
+
 pub struct PartFileManager {
     pub final_path: PathBuf,
     pub part_path: PathBuf,
     pub meta_path: PathBuf,
-    pub file: File,
+    pub file: Option<File>,
     pub metadata: PartMetadata,
     overwrite: bool,
     recent_chunk_hashes: std::collections::HashMap<u64, [u8; 32]>,
+    last_checkpoint: std::time::Instant,
+    bytes_since_checkpoint: u64,
+    dirty: bool,
 }
 
 impl PartFileManager {
@@ -194,10 +200,13 @@ impl PartFileManager {
             final_path,
             part_path,
             meta_path,
-            file,
+            file: Some(file),
             metadata,
             overwrite: force,
             recent_chunk_hashes,
+            last_checkpoint: std::time::Instant::now(),
+            bytes_since_checkpoint: 0,
+            dirty: false,
         };
 
         Ok(PrepareResult::Ready {
@@ -206,16 +215,48 @@ impl PartFileManager {
         })
     }
 
-    /// Persist current metadata state to .part.meta
+    /// Flush data to OS cache and atomically commit metadata to .part.meta
     pub async fn persist_metadata(&mut self) -> Result<()> {
+        if !self.dirty && self.meta_path.exists() {
+            return Ok(());
+        }
+
+        // 1. Flush file writes to ensure data payload is in OS buffers before metadata says it exists
+        if let Some(ref mut f) = self.file {
+            f.flush()
+                .await
+                .context("Failed to flush partial file before checkpoint")?;
+        }
+
+        // 2. Serialize metadata to JSON
         let json = serde_json::to_vec(&self.metadata)?;
-        tokio::fs::write(&self.meta_path, json)
+
+        // 3. Write to temporary file in same folder
+        let tmp_meta = self.meta_path.with_extension("meta.tmp");
+        tokio::fs::write(&tmp_meta, &json)
             .await
-            .context("Failed to write part metadata")?;
+            .context("Failed to write temporary part metadata")?;
+
+        // 4. Atomically replace metadata file (using MoveFileExW on Windows, rename on Unix)
+        publish_file(&tmp_meta, &self.meta_path, true)
+            .await
+            .context("Failed to commit part metadata")?;
+
+        self.dirty = false;
+        self.last_checkpoint = std::time::Instant::now();
+        self.bytes_since_checkpoint = 0;
         Ok(())
     }
 
-    /// Write verified chunk and persist metadata update
+    /// Explicitly flush any uncommitted metadata (e.g. on pause, cancellation or error)
+    pub async fn flush_checkpoint(&mut self) -> Result<()> {
+        if self.dirty {
+            self.persist_metadata().await?;
+        }
+        Ok(())
+    }
+
+    /// Write verified chunk and persist metadata update if time/bytes threshold reached
     pub async fn write_verified_chunk(
         &mut self,
         offset: u64,
@@ -227,12 +268,11 @@ impl PartFileManager {
             bail!("Bloque fuera de los límites del archivo (offset {} + len {} > {})", offset, len, self.metadata.file_size);
         }
 
-        self.file
-            .seek(SeekFrom::Start(offset))
+        let file = self.file.as_mut().context("Partial file is closed")?;
+        file.seek(SeekFrom::Start(offset))
             .await
             .context("Failed to seek partial file")?;
-        self.file
-            .write_all(data)
+        file.write_all(data)
             .await
             .context("Failed to write chunk to disk")?;
 
@@ -257,7 +297,15 @@ impl PartFileManager {
             self.recent_chunk_hashes.retain(|&end, _| end >= contiguous_end);
         }
 
-        self.persist_metadata().await?;
+        self.dirty = true;
+        self.bytes_since_checkpoint += len;
+
+        // Persist metadata checkpoint when 2s or 16 MiB threshold is crossed
+        if self.last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL
+            || self.bytes_since_checkpoint >= CHECKPOINT_BYTES_THRESHOLD
+        {
+            self.persist_metadata().await?;
+        }
 
         Ok(())
     }
@@ -265,18 +313,20 @@ impl PartFileManager {
     /// Commit, flush and atomically rename .part to final target file
     pub async fn finalize(mut self) -> Result<PathBuf> {
         self.persist_metadata().await?;
-        self.file
-            .flush()
-            .await
-            .context("Failed to flush file to disk")?;
-        if self.metadata.verified_bytes != self.metadata.file_size || self.file.metadata().await?.len() < self.metadata.file_size {
-            bail!("No se puede finalizar un archivo incompleto");
+        if let Some(mut file) = self.file.take() {
+            file.flush()
+                .await
+                .context("Failed to flush file to disk")?;
+            if self.metadata.verified_bytes != self.metadata.file_size
+                || file.metadata().await?.len() < self.metadata.file_size
+            {
+                bail!("No se puede finalizar un archivo incompleto");
+            }
+            file.sync_all()
+                .await
+                .context("Failed to sync file storage")?;
+            drop(file);
         }
-        self.file
-            .sync_all()
-            .await
-            .context("Failed to sync file storage")?;
-        drop(self.file);
 
         publish_file(&self.part_path, &self.final_path, self.overwrite).await
             .with_context(|| {
@@ -287,8 +337,20 @@ impl PartFileManager {
                 )
             })?;
         let _ = tokio::fs::remove_file(&self.meta_path).await;
+        let _ = tokio::fs::remove_file(self.meta_path.with_extension("meta.tmp")).await;
+        self.dirty = false;
 
-        Ok(self.final_path)
+        Ok(self.final_path.clone())
+    }
+}
+
+impl Drop for PartFileManager {
+    fn drop(&mut self) {
+        if self.dirty {
+            if let Ok(json) = serde_json::to_vec(&self.metadata) {
+                let _ = std::fs::write(&self.meta_path, json);
+            }
+        }
     }
 }
 
